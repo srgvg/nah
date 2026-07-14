@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`eval "$(mise activate <shell>)"` is no longer classified as obfuscated.**
+  Agents in mise-managed repos wrap every command as
+  `bash -c 'eval "$(mise activate bash)" && <cmd>'` to get mise tools/env on
+  PATH. The `eval` + command-substitution short-circuited to `obfuscated` before
+  the inner command was ever classified, so every wrapped command asked (and
+  Codex, lacking `ask_fallback: defer`, prompted each time). nah now recognizes
+  the narrow, known-safe `mise activate bash|zsh|fish [safe flags]` idiom as env
+  setup (`filesystem_read → allow`) so the real command drives the decision;
+  anything else (extra commands, operators, shell metacharacters, non-`activate`
+  subcommands) still classifies as `obfuscated` (fail closed). Bare
+  `mise activate` is now a built-in `filesystem_read` classification too.
+
 ### Added
 
 - **`nah log` now surfaces the calling agent.** Each entry already recorded which
