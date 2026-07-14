@@ -9,10 +9,9 @@ hide:
     <div class="nah-hero-logo">
       <img src="assets/logo.png" alt="nah" class="invertible">
     </div>
-    <h1>You should sandbox your agents. This is for when you don't.</h1>
+    <h1>Action-aware, deterministic permissions for coding agents</h1>
     <p class="nah-hero-copy">
-      Action-aware, deterministic permissions for coding agents — the guardrail for
-      the laptop, the shared box, the environment where the secrets are just sitting there.
+      You should sandbox your agents. This is for when you don't.
     </p>
     <p class="nah-hero-detail">
       nah sits between coding agents and your shell, files, and tools, allowing
@@ -32,12 +31,43 @@ hide:
   <section class="nah-section nah-problem">
     <div class="nah-section-heading">
       <p class="nah-eyebrow">The problem</p>
-      <h2>Command names are the wrong abstraction.</h2>
+      <h2>Outside a sandbox, your options are permissions, auto modes, or yolo.</h2>
       <p>
-        <code>git</code>, <code>rm</code>, and <code>cat</code> are not safe or
-        unsafe by themselves. The action depends on arguments, paths, context,
-        wrappers, and where the data flows.
+        Sometimes a coding agent has to run where it isn't sandboxed: your laptop,
+        or a server with injected secrets. Every way of keeping it in check trades
+        away something you need.
       </p>
+    </div>
+
+    <div class="nah-options">
+      <div class="nah-option is-them">
+        <span class="nah-option-mark">&#10007;</span>
+        <h3>Manual permissions</h3>
+        <p>Endless prompts, or you over-grant.</p>
+      </div>
+      <div class="nah-option is-them">
+        <span class="nah-option-mark">&#10007;</span>
+        <h3>Auto modes</h3>
+        <p>An LLM is still deciding.</p>
+      </div>
+      <div class="nah-option is-them">
+        <span class="nah-option-mark">&#10007;</span>
+        <h3>YOLO</h3>
+        <p>No guardrails at all.</p>
+      </div>
+      <div class="nah-option is-us">
+        <span class="nah-option-mark">&#10003;</span>
+        <h3>nah</h3>
+        <p>Deterministic policy. Low friction. No LLM. Milliseconds.</p>
+      </div>
+    </div>
+
+  </section>
+
+  <section class="nah-section nah-problem">
+    <div class="nah-section-heading">
+      <p class="nah-eyebrow">Why manual permissions fail</p>
+      <h2>Command names are the wrong abstraction.</h2>
     </div>
 
     <div class="nah-compare-grid">
@@ -141,20 +171,21 @@ nah blocked: this runs unknown code</code></pre>
 
   <section class="nah-section nah-enforcement">
     <div class="nah-enforcement-copy">
-      <p class="nah-eyebrow">Why nah</p>
-      <h2>Auto modes still ask a model. Deterministic permissions enforce the boundary.</h2>
+      <p class="nah-eyebrow">Why auto modes fall short</p>
+      <h2>Advice, not enforcement.</h2>
       <p>
-        Claude Code Auto Mode and Codex auto-review style workflows can reduce
-        prompting, but they still lean on model judgment and prompt instructions.
-        nah runs before the action executes, classifying actions deterministically
-        without spending tokens.
+        Claude Code Auto Mode and Codex auto-review are a real improvement on
+        skipping permissions, but they still lean on model judgment, and no
+        classifier is perfect. nah runs before the action executes, classifying
+        actions deterministically without spending tokens.
       </p>
+      <a class="nah-inline-link" href="https://www.anthropic.com/engineering/claude-code-auto-mode">Anthropic on Auto Mode's limits</a>
     </div>
     <div class="nah-versus" aria-label="nah versus auto modes">
       <div class="nah-versus-column is-them">
         <div class="nah-versus-label">Auto modes</div>
         <h3>System prompts are advisory.</h3>
-        <p>AI reviews can guide behavior, but a non-deterministic next-token predictor is still deciding what to do next.</p>
+        <p>AI reviews can guide behavior, but a non-deterministic predictor is still deciding. By Anthropic's own measure, about 1 in 6 real overeager actions still get through.</p>
         <div class="nah-versus-rule"></div>
         <h4>More tokens, more cost.</h4>
         <p>Repeated model-review loops spend tokens and latency on routine permission decisions that should be resolved by policy.</p>
@@ -229,11 +260,12 @@ nah blocked: this runs unknown code</code></pre>
   <section class="nah-section nah-config">
     <div class="nah-section-heading nah-config-heading">
       <p class="nah-eyebrow">Configuration</p>
-      <h2>Policy belongs in the repo, not in the prompt.</h2>
+      <h2>Rules you can read, not a prompt you hope works.</h2>
       <p>
-        nah works with zero config. Security-minded users and teams can still
-        encode reviewable rules as YAML or CLI commands: global defaults for
-        the user, project <code>.nah.yaml</code> for tighten-only team policy.
+        nah works with zero config. When you want more control, you write the
+        rules yourself, in plain YAML or a CLI command you can read, diff, and check
+        into git. Global defaults for your machine; a project <code>.nah.yaml</code>
+        that can only tighten.
       </p>
     </div>
     <div class="nah-config-layout">

@@ -3,9 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>You should sandbox your agents. This is for when you don't.</strong><br>
-  Action-aware, deterministic permissions for coding agents — the guardrail for the
-  laptop, the shared box, the environment where the secrets are just sitting there.
+  <strong>Action-aware, deterministic permissions for coding agents</strong><br>
+  You should sandbox your agents. This is for when you don't.
 </p>
 
 <p align="center">
@@ -22,37 +21,55 @@
 
 ## The Problem
 
-### Command names are the wrong abstraction
+You shouldn't run a coding agent outside a sandbox. Sometimes you do it anyway,
+on your laptop or on a server with injected secrets. That leaves three ways to
+keep it in check, and each trades away something you need.
+
+### Three options, each a bad trade
+
+- **Manual permissions:** approve every action and you drown in prompts; pre-approve and you over-grant.
+- **Auto modes:** Claude Code Auto Mode, Codex auto-review. Less prompting, but an LLM is still deciding. Advice, not enforcement.
+- **YOLO** (`--dangerously-skip-permissions`): speed, zero guardrails.
+
+The first two look fixable. They aren't, and it's worth seeing why.
+
+### A permission list of command names is the wrong abstraction
 
 `git` can check status, or it can rewrite history.
 
-`git status` — normal.<br>
-`git reset --hard HEAD~20` — destroys work.
+`git status`: normal.<br>
+`git reset --hard HEAD~20`: destroys work.
 
 `rm` can clean a build artifact, or it can break your shell.
 
-`rm -rf __pycache__` — cleanup.<br>
-`rm ~/.bashrc` — breaks your shell.
+`rm -rf __pycache__`: cleanup.<br>
+`rm ~/.bashrc`: breaks your shell.
 
 `cat` can read source code, or it can leak cloud keys.
 
-`cat ./src/app.py` — normal.<br>
-`cat ~/.aws/credentials` — leaks credentials.
+`cat ./src/app.py`: normal.<br>
+`cat ~/.aws/credentials`: leaks credentials.
 
 Even when you curate permissions, agents can route around command names through
 shells, wrappers, scripts, and MCP tools. Allow/deny lists are a fool's errand.
 You either approve too much, block useful work, or train yourself to click
 through prompts.
 
-### Auto modes are just advice, not enforcement
+### Auto modes are advice, not enforcement
 
-Auto modes like Claude Code's Auto Mode and Codex auto review can reduce
-interruptions, but they still lean on model judgement and prompt instructions.
-System prompts are advisory: a
-non-deterministic next-token predictor is still deciding what to do next. That
-is not reproducible, auditable policy enforcement. It is another judgement loop
-spending tokens and time on decisions a local classifier can make in
-milliseconds.
+Auto modes like Claude Code's Auto Mode and Codex auto review are a real
+improvement on skipping permissions, but they still lean on model judgement, and
+no classifier is perfect. Anthropic's [own evaluation](https://www.anthropic.com/engineering/claude-code-auto-mode)
+of Auto Mode is candid that the deployed pipeline still misses about 1 in 6 real
+overeager actions. nah thinks there's a more predictable path: classify the
+decisions you can express as policy deterministically, and get the same answer
+every time, in milliseconds with no tokens.
+
+### What nah does instead
+
+**nah doesn't make you trade.** It reads what an action *does*, applies your
+policy in milliseconds, and gives the same answer every time. Low friction and
+no LLM required.
 
 ## The Idea
 
@@ -86,7 +103,7 @@ Detailed tool coverage and classifier internals live in the
 
 Install the `nah` CLI, then connect the runtime you want to protect.
 
-**Recommended — isolated CLI install (pick one):**
+**Recommended isolated CLI install (pick one):**
 
 ```bash
 pipx install "nah[config,keys]"
@@ -132,7 +149,7 @@ does not include `nah test`, Codex support, the terminal guard, PyYAML config
 support, or keyring support. If you already installed direct hooks, run
 `nah uninstall claude` before enabling it.
 
-**Don't use `--dangerously-skip-permissions` or `--enable-auto-mode`** — just
+**Don't use `--dangerously-skip-permissions` or `--enable-auto-mode`.** Just
 run `claude` in default mode. `nah run claude` rejects flags that bypass or
 auto-approve Claude Code permissions because those modes can run tool calls
 outside the guarded path.
@@ -208,7 +225,6 @@ actions:
   filesystem_delete: ask         # always confirm deletes
   git_history_rewrite: block     # never allow force push
   lang_exec: ask                 # always confirm script/runtime execution
-  container_build: block         # useful for unattended/unsupervised agents
 
 # Guard sensitive directories
 sensitive_paths:
@@ -231,19 +247,8 @@ trusted_containers:
 nah classifies by **action type**, not just command name. Policies are `allow`,
 `context`, `ask`, or `block`.
 
-Container lifecycle commands that act on a named container
-(`docker stop api`, `podman restart worker`) use `container_lifecycle` and are
-allowed only when every flag-free container identity is listed in
-`trusted_containers`; flags, dynamic names, and compose lifecycle commands ask.
-Container image/build/infra commands (`docker build`, `docker compose build`,
-`docker network create`) use `container_build` and default to allow. Legacy
-`container_write` config is migration-only: `actions:` fans out to both new
-types, `classify:` maps to `container_lifecycle`, and interactive CLI writes ask
-you to choose one of the new types.
-
-Project config loads from the Git root, or from `./.nah.yaml` in the current
-directory outside Git. It is tighten-only unless you trust that exact project
-root with `nah trust-project`.
+Project `.nah.yaml` (loaded from the Git root) can only tighten policy, unless
+you trust that root with `nah trust-project`.
 
 See [configuration](https://nah.build/configuration/) and
 [action types](https://nah.build/configuration/actions/) for the full
