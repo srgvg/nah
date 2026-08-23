@@ -191,6 +191,34 @@ class TestResolveFilesystemContext:
         assert decision == "allow"
         assert "script path allowed" in reason
 
+    def test_scratch_sibling_root_delete_allowed(self, tmp_path, monkeypatch):
+        """A repo's own scratch root is disposable — deleting it must not ask.
+
+        Writes into <parent>/_scratch/<repo> are inside the project boundary
+        (boundary_siblings), but the root itself is not a protected project
+        root: ~/.claude/rules/scratch-dirs.md says cleanup is part of "done".
+        """
+        repo, worktree = _make_git_worktree(tmp_path)
+        monkeypatch.chdir(worktree)
+        paths.reset_project_root()
+        scratch_root = repo.parent / "_scratch" / repo.name
+        scratch_root.mkdir(parents=True)
+
+        decision, _reason = resolve_context("filesystem_delete", target_path=str(scratch_root))
+
+        assert decision != "ask"
+
+    def test_worktree_root_delete_still_asks(self, tmp_path, monkeypatch):
+        """The project root itself (not a scratch sibling) keeps asking."""
+        _repo, worktree = _make_git_worktree(tmp_path)
+        monkeypatch.chdir(worktree)
+        paths.reset_project_root()
+
+        decision, reason = resolve_context("filesystem_delete", target_path=str(worktree))
+
+        assert decision == "ask"
+        assert "delete targets project root" in reason
+
 
 # --- resolve_network_context ---
 

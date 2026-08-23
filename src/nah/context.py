@@ -370,7 +370,7 @@ def check_catastrophic_delete_target(
             )
 
     if protect_project_root:
-        for project_root in paths.get_project_boundary_roots():
+        for project_root in paths.get_protected_project_roots():
             if _selects_tree(normalized, project_root, include_contents=True):
                 return (
                     taxonomy.ASK,

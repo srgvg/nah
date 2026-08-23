@@ -616,6 +616,24 @@ class TestProjectRoot:
             paths.resolve_path(str(repo.parent / "_scratch" / repo.name)),
         ]
 
+    def test_protected_roots_exclude_scratch_sibling(self, tmp_path, monkeypatch):
+        repo, worktree = _make_git_worktree(tmp_path)
+        monkeypatch.chdir(worktree)
+        paths.reset_project_root()
+
+        # Protected (delete-guard) roots stay narrow: worktree + main repo only.
+        assert paths.get_protected_project_roots() == [
+            paths.resolve_path(str(worktree)),
+            paths.resolve_path(str(repo)),
+        ]
+        # The wider boundary (read/write) list still includes the scratch siblings.
+        assert paths.get_project_boundary_roots() == [
+            paths.resolve_path(str(worktree)),
+            paths.resolve_path(str(repo)),
+            paths.resolve_path(str(worktree.parent / "_scratch" / worktree.name)),
+            paths.resolve_path(str(repo.parent / "_scratch" / repo.name)),
+        ]
+
     def test_project_boundary_allows_main_repo_file_from_worktree(self, tmp_path, monkeypatch):
         repo, worktree = _make_git_worktree(tmp_path)
         monkeypatch.chdir(worktree)

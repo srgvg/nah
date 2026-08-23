@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`boundary_siblings` scratch roots (e.g. `<parent>/_scratch/<repo>`) no
+  longer ask before deletion.** The project-root delete guard reused the same
+  widened boundary list that grants scratch writes, so deleting a scratch
+  directory's root asked "delete targets project root" every time — backwards
+  for a convention whose contents are meant to be disposable. Delete
+  protection now uses a narrower `get_protected_project_roots()` (the actual
+  project/worktree roots only); write/read boundary checks are unaffected.
 - Catastrophic filesystem deletes that select `/`, the current home directory,
   or their contents now block before runtime approval, including equivalent
   tilde, environment-variable, glob, wrapper, and multi-target forms.

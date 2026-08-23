@@ -80,6 +80,7 @@ _SENSITIVE_BASENAMES: list[tuple[str, str, str]] = [
 _project_root: str | None = None
 _project_root_resolved = False
 _project_boundary_roots: list[str] | None = None
+_protected_project_roots: list[str] | None = None
 _PROJECT_CONFIG_NAME = ".nah.yaml"
 
 # Snapshot of hardcoded defaults for reset (testing).
@@ -448,17 +449,21 @@ def check_project_boundary(tool_name: str, raw_path: str) -> dict | None:
 def set_project_root(path: str) -> None:
     """Override project root (for testing). Bypasses git auto-detection."""
     global _project_root, _project_root_resolved, _project_boundary_roots
+    global _protected_project_roots
     _project_root = path
     _project_root_resolved = True
     _project_boundary_roots = None
+    _protected_project_roots = None
 
 
 def reset_project_root() -> None:
     """Clear project root override, restoring auto-detection."""
     global _project_root, _project_root_resolved, _project_boundary_roots
+    global _protected_project_roots
     _project_root = None
     _project_root_resolved = False
     _project_boundary_roots = None
+    _protected_project_roots = None
 
 
 def get_project_root() -> str | None:
@@ -521,30 +526,27 @@ def _git_output(args: list[str]) -> str | None:
     return output or None
 
 
-def get_project_boundary_roots() -> list[str]:
-    """Return roots that count as inside the current project boundary.
+def get_protected_project_roots() -> list[str]:
+    """Return roots that are delete-protected as "the project itself".
 
     In a linked git worktree, `git rev-parse --show-toplevel` is the worktree
     root while shared repo files live under the main checkout. Use
     `--git-common-dir` to add that main checkout root when it can be derived
     unambiguously.
 
-    Each root additionally grows a sibling scratch root, `<parent>/<sibling>/
-    <basename>` for each name in config `boundary_siblings` (default
-    `["_scratch"]`) — this is the repo-adjacent bulk-data convention
-    (~/.claude/rules/scratch-dirs.md): `<parent-of-repo>/_scratch/<repo>/`.
-    The directory need not exist yet; the path is fully determined by the
-    root, and `scratch dir` creates it on first use. Only that one sibling
-    directory is widened, never the whole `_scratch/` tree, so another
-    repo's scratch dir under the same parent still asks.
+    Deliberately excludes the `boundary_siblings` scratch roots added by
+    `get_project_boundary_roots()` below — a scratch directory is disposable
+    by convention (~/.claude/rules/scratch-dirs.md: "task done includes
+    scratch deleted"), so it must not inherit "this is your project, are you
+    sure" protection just because writes into it are allowed.
     """
-    global _project_boundary_roots
-    if _project_boundary_roots is not None:
-        return list(_project_boundary_roots)
+    global _protected_project_roots
+    if _protected_project_roots is not None:
+        return list(_protected_project_roots)
 
     project_root = get_project_root()
     if project_root is None:
-        _project_boundary_roots = []
+        _protected_project_roots = []
         return []
 
     roots: list[str] = []
@@ -562,6 +564,37 @@ def get_project_boundary_roots() -> list[str]:
 
             if os.path.basename(real_common_dir) == ".git":
                 _append_unique_path(roots, os.path.dirname(real_common_dir))
+
+    _protected_project_roots = roots
+    return list(roots)
+
+
+def get_project_boundary_roots() -> list[str]:
+    """Return roots that count as inside the current project boundary.
+
+    Starts from `get_protected_project_roots()` and additionally grows a
+    sibling scratch root, `<parent>/<sibling>/<basename>` for each name in
+    config `boundary_siblings` (default `["_scratch"]`) — this is the
+    repo-adjacent bulk-data convention (~/.claude/rules/scratch-dirs.md):
+    `<parent-of-repo>/_scratch/<repo>/`. The directory need not exist yet;
+    the path is fully determined by the root, and `scratch dir` creates it
+    on first use. Only that one sibling directory is widened, never the
+    whole `_scratch/` tree, so another repo's scratch dir under the same
+    parent still asks.
+
+    This wider list is for read/write boundary checks only — it is not used
+    for delete protection, since a scratch root is meant to be disposable.
+    See `get_protected_project_roots()`.
+    """
+    global _project_boundary_roots
+    if _project_boundary_roots is not None:
+        return list(_project_boundary_roots)
+
+    roots = get_protected_project_roots()
+    if not roots:
+        _project_boundary_roots = []
+        return []
+    roots = list(roots)
 
     from nah.config import get_config  # lazy import to avoid circular
     siblings = get_config().boundary_siblings
