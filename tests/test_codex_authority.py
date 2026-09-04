@@ -32,6 +32,15 @@ def test_render_authority_rules_is_deterministic_prompt_only():
         assert f'pattern = ["{prefix}"]' in first
 
 
+def test_authority_prefixes_cover_process_signal_commands():
+    # kill/pkill are process_signal -> ask in nah's own taxonomy (test_bash.py
+    # test_kill_9_ask/test_pkill_ask), and touch nothing the workspace-write
+    # sandbox would ever flag (no filesystem write, no network) -- without an
+    # explicit prefix rule here, Codex never routes either through nah at all.
+    assert "kill" in AUTHORITY_RULE_PREFIXES
+    assert "pkill" in AUTHORITY_RULE_PREFIXES
+
+
 def test_ensure_authority_rules_creates_and_is_idempotent(tmp_path):
     home = tmp_path / "codex"
     path = authority_rules_path(home)

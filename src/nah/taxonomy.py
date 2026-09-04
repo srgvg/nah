@@ -2325,7 +2325,6 @@ _CODEX_UNSAFE_CONFIG_KEYS = {
     "hooks.PermissionRequest",
     "hooks.PostToolUse",
     "hooks.PreToolUse",
-    "permission_profile",
     "permissions",
     "sandbox_mode",
 }

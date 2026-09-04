@@ -31,6 +31,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`nah run codex` no longer breaks on Codex >=0.149.0.** Codex retired
+  `approval_policy="untrusted"` (2026-08-19, first shipped in the 0.149.0
+  npm release), and `nah run codex` unconditionally injected it as the only
+  approval mechanism it had — every Codex launch, interactive and headless,
+  started failing config load with
+  `approval_policy = "untrusted" is no longer supported`. `untrusted` is the
+  value that made Codex ask before every command outside its trusted set,
+  which is how nah's `PermissionRequest` hook was consulted at all while the
+  sandbox ran `danger-full-access`. Codex's only remaining approval values,
+  `on-request` and `never`, cannot recreate that catch-all — neither can
+  `permissions`/`default_permissions` profiles (sandbox scoping, not
+  approval), the `granular` approval config (only allows/auto-rejects prompts
+  already shown, cannot create new ones), or a PreToolUse hook returning
+  `permissionDecision: "ask"` (rejected by Codex's own hook engine). The
+  launcher's default flips to `approval_policy="on-request"` +
+  `sandbox_mode="workspace-write"`: every write outside the workspace and
+  every network call is now a sandbox-escalation approval that still reaches
+  `PermissionRequest`, restoring the catch-all Codex no longer provides
+  natively. That leaves a narrower gap than `untrusted` did — an in-workspace
+  command that is destructive or infrastructure-facing but touches nothing
+  the sandbox flags runs unprompted — so `AUTHORITY_RULE_PREFIXES`
+  (`codex_authority.py`, rendered into `$CODEX_HOME/rules/nah-authority.rules`)
+  widens from the 37 Codex-known-safe names to also force `prompt` for
+  destructive/infra commands (`rm`, `mv`, `cp`, `chmod`, `chown`, `dd`,
+  `shred`, `mkfs`, `sudo`, `docker`, `podman`, `kubectl`, `talosctl`, `flux`,
+  `helm`, `terraform`, `tofu`, `ssh`, `scp`, `rsync`, `curl`, `wget`, `gh`,
+  `glab`, the `npm`/`pip`/`uv` family, interpreters, `systemctl`,
+  `journalctl`, `xargs`, `nohup`, `env`, `install`, `ln`). `--network` on the
+  new default sandbox is no longer a no-op (it enables network access on
+  `workspace-write`, which is now the default sandbox rather than an
+  opt-in); pass `--sandbox danger-full-access` to get the previous
+  no-sandbox posture back. Also dropped `permission_profile` from the
+  owned/unsafe Codex config-key lists — it isn't a Codex 0.153.2 config key
+  and guarding a nonexistent key served no purpose. A live-verification
+  `/gcr` pass on this change (see `codex-run` skill) found and fixed two
+  gaps in the initial version: a raw `-c sandbox_workspace_write.network_access=true`
+  wasn't rejected, so it could silently re-enable network access outside
+  nah's own `--network` tracking — `sandbox_workspace_write.network_access`
+  is now an owned config key like `sandbox_mode`; and `kill`/`pkill`
+  (`process_signal → ask` in nah's own taxonomy) were missing from
+  `AUTHORITY_RULE_PREFIXES` — neither touches the filesystem or network, so
+  the `workspace-write` sandbox alone would never route them through nah.
 - **`boundary_siblings` scratch roots (e.g. `<parent>/_scratch/<repo>`) no
   longer ask before deletion.** The project-root delete guard reused the same
   widened boundary list that grants scratch writes, so deleting a scratch

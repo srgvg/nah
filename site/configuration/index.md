@@ -195,10 +195,11 @@ it makes the default native behavior explicit. Headless Codex resolves `native`
 to `block` because no native approval prompt is available.
 
 Codex approval settings are owned by `nah run codex`. The launcher defaults to
-Codex `danger-full-access` plus `untrusted` approvals; use
-`nah run codex --sandbox workspace-write` or `--sandbox read-only` when you want
-Codex's own sandbox too. Target config can tune nah policies and LLM behavior
-for Codex, but it cannot change Codex safety knobs directly.
+Codex `workspace-write` sandboxing plus `on-request` approvals; use
+`nah run codex --sandbox danger-full-access` when a task needs unrestricted
+host access, or `--sandbox read-only` for the opposite. Target config can tune
+nah policies and LLM behavior for Codex, but it cannot change Codex safety
+knobs directly.
 
 `nah test --target` accepts `claude`, `codex`, `bash`, and `zsh`, applying the
 selected target's effective configuration during simulation.

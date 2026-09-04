@@ -38,8 +38,8 @@ _BYPASS_FLAGS = {
     "--dangerously-bypass-approvals-and-sandbox",
     "--yolo",
 }
-_DEFAULT_SANDBOX_MODE = "danger-full-access"
-_DEFAULT_APPROVAL_POLICY = "untrusted"
+_DEFAULT_SANDBOX_MODE = "workspace-write"
+_DEFAULT_APPROVAL_POLICY = "on-request"
 _INTERACTIVE_PRE_TOOL_TIMEOUT = 10
 _INTERACTIVE_PERMISSION_TIMEOUT = 14
 _INTERACTIVE_POST_TOOL_TIMEOUT = 10
@@ -97,10 +97,13 @@ _OWNED_CONFIG_KEYS = {
     "hooks.PermissionRequest",
     "hooks.PreToolUse",
     "hooks.PostToolUse",
-    "permission_profile",
     "permissions",
     "rules",
     "sandbox_mode",
+    # A raw override here would silently enable network access outside nah's own
+    # --network flag/tracking, defeating the workspace-write catch-all this launcher
+    # relies on for its safety story (see codex-partitioned-gizmo.md Phase 1).
+    "sandbox_workspace_write.network_access",
 }
 _MANAGED_ENABLE_FLAGS = {
     "apps",

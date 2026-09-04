@@ -25,20 +25,27 @@ Codex change.
 - Codex hooks enabled
 - native `PreToolUse`, `PermissionRequest`, and `PostToolUse` hooks pointing
   at nah
-- `sandbox_mode="danger-full-access"` by default
-- `approval_policy="untrusted"`
-- nah-managed Codex exec-policy prompt rules for Codex known-safe command
-  prefixes
+- `sandbox_mode="workspace-write"` by default
+- `approval_policy="on-request"`
+- nah-managed Codex exec-policy prompt rules for Codex-known-safe command
+  prefixes plus the destructive/infrastructure commands Codex's own sandbox
+  cannot see (`rm`, `sudo`, `docker`, `kubectl`, `ssh`, `terraform`, ...)
 - human approval review
 - dynamic MCP dependency installs disabled
 
-`danger-full-access` gives the Codex process normal host access while nah
-remains the permission authority through Codex's approval hooks. `untrusted`
-normally asks before commands outside Codex's trusted command set. nah also
-installs a managed rules file at
-`$CODEX_HOME/rules/nah-authority.rules` so Codex-known-safe command prefixes,
-such as `cat`, `git`, `ls`, `rg`, and `sed`, are prompted too and nah can apply
-path-sensitive policy before execution.
+Codex retired `approval_policy="untrusted"` (the value that used to ask before
+every command outside Codex's trusted set) in favor of only `on-request` and
+`never`. `on-request` lets the model decide when to ask, so the catch-all now
+comes from Codex's own sandbox instead: `workspace-write` turns any write
+outside the workspace, or any network call, into a sandbox-escalation approval
+that still reaches nah's `PermissionRequest` hook. nah's managed rules file at
+`$CODEX_HOME/rules/nah-authority.rules` covers the gap that leaves -- an
+in-workspace command that is destructive or infrastructure-facing but touches
+nothing the sandbox would flag -- by forcing those prefixes to `prompt` too, so
+nah can still apply path-sensitive policy before execution. A command whose
+program is in neither the sandbox's reach nor this list still runs unprompted;
+see `AUTHORITY_RULE_PREFIXES` in `src/nah/codex_authority.py` for the current
+prefix set.
 
 Use nah's launcher flag when you want Codex's own sandbox too:
 
@@ -53,10 +60,10 @@ session. The launcher strips the flag before starting Codex and exports
 `NAH_PRESET` so all injected hooks use the same effective config.
 
 `--network` enables Codex workspace network access only with
-`--sandbox workspace-write`. With the default `danger-full-access` sandbox,
-network is already host-controlled and the flag is redundant. `workspace-write`
-keeps Codex's filesystem sandbox, which can be useful when you want an
-additional sandbox boundary but can also restrict host-level resources.
+`--sandbox workspace-write` -- which is now the default, so a bare `--network`
+with no explicit `--sandbox` already applies to it. Pass
+`--sandbox danger-full-access` to fall back to nah's old default, where network
+is host-controlled and `--network` is redundant.
 
 For interactive Codex, the `PreToolUse` and `PostToolUse` hooks are
 observation-only. `PostToolUse` lets nah log execution outcomes without
@@ -144,10 +151,10 @@ Headless exec also records Codex hook trust for the session-scoped nah hooks
 that the launcher injects. Interactive `nah run codex` still uses Codex's hook
 review UI; headless cannot safely depend on a prompt that never appears.
 
-The default headless sandbox is still `danger-full-access`. That keeps local
-developer workflows working while nah remains the hook-visible policy gate. Use
-`--sandbox workspace-write --network` when you want Codex's filesystem sandbox
-as an additional boundary.
+The default headless sandbox is `workspace-write`, the same as interactive
+`nah run codex`. Use `--sandbox danger-full-access` for the old unrestricted
+behavior, or `--sandbox workspace-write --network` to also allow network
+access within the sandbox.
 
 ## Hook Review
 

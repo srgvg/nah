@@ -26,14 +26,14 @@ def _launch(args, *, base_env=None):
     )
 
 
-def test_injects_fixed_danger_full_access_preset_before_user_args():
+def test_injects_fixed_workspace_write_preset_before_user_args():
     launch = _launch(["resume", "abc123"])
     argv = launch.argv
 
     assert argv[0] == "/usr/bin/codex"
     assert argv[-2:] == ["resume", "abc123"]
-    assert launch.sandbox_mode == "danger-full-access"
-    assert launch.approval_policy == "untrusted"
+    assert launch.sandbox_mode == "workspace-write"
+    assert launch.approval_policy == "on-request"
     assert launch.confirm_edits is False
     assert launch.network is False
     assert "NAH_CODEX_CONFIRM_EDITS" not in launch.env
@@ -41,8 +41,8 @@ def test_injects_fixed_danger_full_access_preset_before_user_args():
     assert "features.hooks=true" in argv
     assert "features.codex_hooks=true" not in argv
     assert "features.skill_mcp_dependency_install=false" in argv
-    assert 'approval_policy="untrusted"' in argv
-    assert 'sandbox_mode="danger-full-access"' in argv
+    assert 'approval_policy="on-request"' in argv
+    assert 'sandbox_mode="workspace-write"' in argv
     assert 'approvals_reviewer="user"' in argv
     pre_tool_override = next(arg for arg in argv if arg.startswith("hooks.PreToolUse="))
     assert "_codex-pre-tool-use" in pre_tool_override
@@ -68,10 +68,10 @@ def test_headless_exec_is_guarded_by_pre_tool_use():
     assert argv[-3:] == ["exec", "--ignore-rules", "run git status"]
     assert launch.headless is True
     assert launch.headless_ask_fallback == "block"
-    assert launch.sandbox_mode == "danger-full-access"
+    assert launch.sandbox_mode == "workspace-write"
     assert launch.env["NAH_CODEX_HEADLESS"] == "1"
     assert launch.env["NAH_CODEX_HEADLESS_ASK_FALLBACK"] == "block"
-    assert launch.env["NAH_CODEX_SANDBOX"] == "danger-full-access"
+    assert launch.env["NAH_CODEX_SANDBOX"] == "workspace-write"
     assert launch.env["NAH_CODEX_NETWORK"] == "0"
     assert "features.unified_exec=false" in argv
     assert "features.code_mode=false" in argv
@@ -314,8 +314,8 @@ def test_inherited_preset_is_preserved_and_validated(tmp_path):
 def test_deleted_nah_mode_flags_have_no_launcher_behavior(flag):
     launch = _launch([flag, "--no-alt-screen"])
 
-    assert launch.sandbox_mode == "danger-full-access"
-    assert launch.approval_policy == "untrusted"
+    assert launch.sandbox_mode == "workspace-write"
+    assert launch.approval_policy == "on-request"
     assert flag in launch.argv
     assert launch.argv[-2:] == [flag, "--no-alt-screen"]
     assert "NAH_CODEX_AUTO_ALLOW_SAFE_APPLY_PATCH" not in launch.env
@@ -332,8 +332,8 @@ def test_inherited_deleted_edit_envs_do_not_change_launcher_preset():
         },
     )
 
-    assert launch.sandbox_mode == "danger-full-access"
-    assert launch.approval_policy == "untrusted"
+    assert launch.sandbox_mode == "workspace-write"
+    assert launch.approval_policy == "on-request"
     assert launch.env["NAH_CODEX_AUTO_ALLOW_SAFE_APPLY_PATCH"] == "1"
     assert launch.env["NAH_CODEX_ACCEPT_EDITS"] == "1"
 
@@ -425,23 +425,28 @@ def test_network_flag_enables_workspace_write_network_access():
     assert launch.argv[-2:] == ["resume", "abc123"]
 
 
-def test_network_flag_is_redundant_for_default_danger_full_access():
+def test_network_flag_enables_network_access_for_default_workspace_write():
+    # The default sandbox is workspace-write (restored as the catch-all that
+    # `approval_policy="untrusted"` used to provide), so a bare --network with
+    # no explicit --sandbox is no longer a no-op: it enables network access on
+    # that default sandbox exactly as it would with an explicit
+    # --sandbox workspace-write.
     launch = _launch(["--network", "resume", "abc123"])
 
-    assert launch.sandbox_mode == "danger-full-access"
+    assert launch.sandbox_mode == "workspace-write"
     assert launch.network is True
-    assert "sandbox_workspace_write.network_access=true" not in launch.argv
+    assert "sandbox_workspace_write.network_access=true" in launch.argv
     assert "--network" not in launch.argv
     assert launch.argv[-2:] == ["resume", "abc123"]
 
 
-def test_headless_network_metadata_is_set_for_default_danger_full_access():
+def test_headless_network_metadata_is_set_for_default_workspace_write():
     launch = _launch(["--network", "exec", "run curl -I https://example.com"])
 
     assert launch.headless is True
     assert launch.network is True
     assert launch.env["NAH_CODEX_NETWORK"] == "1"
-    assert "sandbox_workspace_write.network_access=true" not in launch.argv
+    assert "sandbox_workspace_write.network_access=true" in launch.argv
     assert launch.argv[-3:] == ["exec", "--ignore-rules", "run curl -I https://example.com"]
 
 
@@ -469,6 +474,8 @@ def test_network_flag_rejects_value_form_and_read_only_sandbox():
         ["-c", "hooks.PostToolUse=[]"],
         ["-c", "rules.prefix_rules=[]"],
         ["--config=rules.prefix_rules=[]"],
+        ["-c", "sandbox_workspace_write.network_access=true"],
+        ["--config=sandbox_workspace_write.network_access=true"],
         ["--disable", "hooks"],
         ["--disable", "codex_hooks"],
         ["--enable=hooks"],

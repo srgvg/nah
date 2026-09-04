@@ -54,12 +54,12 @@ nah run codex --measure-hook-timeout
 
 `nah run codex` is a special launcher dispatch rather than a persistent install
 target. It starts Codex with session-scoped native hooks, uses
-`danger-full-access` / `untrusted` by default, installs nah-managed Codex prompt
-rules for known-safe command prefixes, and runs Codex
-authority/approval-memory/MCP preflight before launch. Use
-`--sandbox workspace-write` when you want Codex filesystem sandboxing too; add
-`--network` with `workspace-write` when that sandbox should allow network
-access.
+`workspace-write` / `on-request` by default, installs nah-managed Codex prompt
+rules for known-safe and destructive/infrastructure command prefixes, and runs
+Codex authority/approval-memory/MCP preflight before launch. Add `--network`
+to let that default sandbox reach the network; use
+`--sandbox danger-full-access` to fall back to unrestricted host access
+instead.
 
 Codex owns hook review state. On first launch, or after nah adds or changes a
 hook command, open `/hooks` inside Codex and review the nah hooks so
