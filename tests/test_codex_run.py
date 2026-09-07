@@ -43,7 +43,8 @@ def test_injects_fixed_workspace_write_preset_before_user_args():
     assert "features.skill_mcp_dependency_install=false" in argv
     assert 'approval_policy="on-request"' in argv
     assert 'sandbox_mode="workspace-write"' in argv
-    assert 'approvals_reviewer="user"' in argv
+    # Leave reviewer selection to Codex config/profile defaults.
+    assert not any(arg.startswith("approvals_reviewer=") for arg in argv)
     pre_tool_override = next(arg for arg in argv if arg.startswith("hooks.PreToolUse="))
     assert "_codex-pre-tool-use" in pre_tool_override
     assert "/usr/local/bin/nah" in pre_tool_override
@@ -59,6 +60,21 @@ def test_injects_fixed_workspace_write_preset_before_user_args():
     assert "/usr/local/bin/nah" in post_tool_override
     assert "-m nah.cli" not in post_tool_override
     assert "timeout = 10" in post_tool_override
+
+
+@pytest.mark.parametrize("reviewer", ["user", "auto_review"])
+@pytest.mark.parametrize("flag", ["-c", "--config", "--config="])
+def test_forwards_codex_approval_reviewer_without_changing_guard(reviewer, flag):
+    value = f'approvals_reviewer="{reviewer}"'
+    args = [flag + value] if flag.endswith("=") else [flag, value]
+
+    launch = _launch(args)
+
+    assert launch.argv[-len(args):] == args
+    assert launch.approval_policy == "on-request"
+    assert launch.sandbox_mode == "workspace-write"
+    assert "features.hooks=true" in launch.argv
+    assert any(arg.startswith("hooks.PermissionRequest=") for arg in launch.argv)
 
 
 def test_headless_exec_is_guarded_by_pre_tool_use():

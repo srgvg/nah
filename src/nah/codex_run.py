@@ -87,7 +87,6 @@ _REJECT_VALUE_FLAGS = {
 }
 _OWNED_CONFIG_KEYS = {
     "approval_policy",
-    "approvals_reviewer",
     "default_permissions",
     "features.apps",
     "features.codex_hooks",
@@ -206,13 +205,14 @@ def injected_overrides(
         "statusMessage = \"nah logging\" "
         "}] }]"
     )
+    # Codex owns reviewer selection (user/auto_review), including saved config
+    # and profile defaults. nah owns when approval is required and its hooks.
     overrides = [
         "-c", "features.apps=false",
         "-c", "features.hooks=true",
         "-c", "features.skill_mcp_dependency_install=false",
         "-c", f"approval_policy={_toml_string(approval_policy)}",
         "-c", f"sandbox_mode={_toml_string(sandbox_mode)}",
-        "-c", 'approvals_reviewer="user"',
         "-c", pre_tool_hook_config,
         "-c", permission_hook_config,
         "-c", post_tool_hook_config,

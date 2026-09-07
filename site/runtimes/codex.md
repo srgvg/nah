@@ -30,7 +30,7 @@ Codex change.
 - nah-managed Codex exec-policy prompt rules for Codex-known-safe command
   prefixes plus the destructive/infrastructure commands Codex's own sandbox
   cannot see (`rm`, `sudo`, `docker`, `kubectl`, `ssh`, `terraform`, ...)
-- human approval review
+- approval reviewer inherited from Codex config/profile defaults or `-c`
 - dynamic MCP dependency installs disabled
 
 Codex retired `approval_policy="untrusted"` (the value that used to ask before
@@ -71,6 +71,31 @@ changing Codex's native approval UI. The interactive enforcement decision
 happens in `PermissionRequest`. Setting `targets.codex.ask_fallback: native`
 makes the default interactive behavior explicit: an unresolved ask returns to
 Codex's native approval reviewer.
+
+### Approval reviewer default
+
+nah preserves Codex's `approvals_reviewer` setting. To start with **Approve for
+me**, set this in the top-level Codex configuration:
+
+```toml
+approvals_reviewer = "auto_review"
+```
+
+Use `"user"` for manual review, or omit the setting to use Codex's default.
+An explicit launch override is also supported:
+
+```bash
+nah run codex -c 'approvals_reviewer="auto_review"'
+```
+
+This selects who reviews approvals left unresolved by nah. The launcher still
+sets `approval_policy="on-request"`, enables nah's hooks, and maintains its
+authority rules. It does not enable network access or change the sandbox.
+Headless `codex exec` still uses nah's authoritative `PreToolUse` handling and
+blocks unresolved asks by default; it does not gain interactive automatic review.
+
+See the [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+for reviewer settings and managed restrictions.
 
 When global `llm.mode: on` is configured, interactive Codex uses the same single
 LLM job as Claude Code: classify a deterministically unknown Bash command into a

@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`nah run codex` preserves the saved approval reviewer.** The launcher no
+  longer forces `approvals_reviewer="user"` or rejects explicit reviewer
+  overrides. Codex config/profile defaults can select `"auto_review"`
+  (Approve for me), while nah retains its approval policy, hooks, authority
+  rules, and headless ask handling.
+
 - **`nah run codex` no longer breaks on Codex >=0.149.0.** Codex retired
   `approval_policy="untrusted"` (2026-08-19, first shipped in the 0.149.0
   npm release), and `nah run codex` unconditionally injected it as the only
