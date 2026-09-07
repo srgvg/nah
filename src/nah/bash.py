@@ -70,6 +70,9 @@ class Stage:
     substitution_guard: bool = False
     loop_var: str = ""
     loop_values: list[str] = field(default_factory=list)
+    # Literal `NAME=value` bindings from earlier chain stages, carried so a
+    # body-substitution guard can expand them inside its substitution text.
+    chain_vars: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1691,6 +1694,23 @@ def _safe_literal_loop_values(values: list[str]) -> bool:
     return all(_safe_literal_loop_value(value) for value in values)
 
 
+def _placeholder_loop_values(values: list[str]) -> bool:
+    """True when every item is a safe literal or a whole substitution placeholder.
+
+    ``for f in $(git diff --name-only)`` iterates one placeholder; the body
+    then classifies with the placeholder standing in for the loop variable,
+    i.e. with the same semantics as the top-level ``wc -l $(…)`` / ``rm $(…)``
+    forms (dynamic read target allows, dynamic delete target asks). A
+    placeholder embedded in a longer word (``$(pwd)/x``) is not resolved.
+    """
+    if not values or len(values) > _MAX_CONTROL_FLOW_EXPANSIONS:
+        return False
+    return all(
+        _safe_literal_loop_value(value) or _placeholder_sub_index(value) is not None
+        for value in values
+    )
+
+
 def _expand_loop_glob_values(
     values: list[str],
     glob_cwd: str | None,
@@ -1900,6 +1920,12 @@ def _consume_for_loop(
                     ),
                 )
             ]
+    if resolved_values is None and _placeholder_loop_values(values):
+        # `for f in $(cmd)`: the header's expansion stage above classifies the
+        # inner command; the placeholder itself stands in for the loop
+        # variable in the body, so the body resolves through nah's top-level
+        # placeholder semantics instead of the blanket dynamic-item-list ask.
+        resolved_values = values
 
     if references_loop_var:
         if _stages_use_unsupported_loop_var_expansion(body_stages, name):
@@ -2540,21 +2566,33 @@ def _substitution_guard_variants(
     inner: str,
     loop_var: str,
     loop_values: list[str],
+    chain_vars: dict[str, str] | None = None,
 ) -> list[str] | None:
     """Concrete inner-command variants for a body-substitution guard.
 
     When the inner command references the loop variable and the loop values
-    are known, one variant per value is produced. ``None`` means the inner
-    command cannot be made concrete (residual variable references) and the
-    caller must keep the ask.
+    are known, one variant per value is produced. Literal bindings from
+    earlier chain stages (``S=docs; for v in …; do … $(wc -l < $S/$v)``) are
+    expanded after the loop variable, which shadows a same-named binding.
+    ``None`` means the inner command cannot be made concrete (residual
+    variable references) and the caller must keep the ask.
     """
+
+    def expand_chain(text: str) -> str:
+        for name, value in (chain_vars or {}).items():
+            if name != loop_var:
+                text = _expand_var_in_text(text, name, value)
+        return text
+
     if loop_var and loop_values and _raw_parts_reference_var([inner], loop_var):
         variants = [
-            _expand_var_in_text(inner, loop_var, value) for value in loop_values
+            expand_chain(_expand_var_in_text(inner, loop_var, value))
+            for value in loop_values
         ]
         if any(_GUARD_VAR_REF_RE.search(variant) for variant in variants):
             return None
         return variants
+    inner = expand_chain(inner)
     if _GUARD_VAR_REF_RE.search(inner):
         return None
     return [inner]
@@ -2595,7 +2633,9 @@ def _resolve_substitution_guard(
         inner = substitutions[idx][0].strip()
         if not inner:
             continue
-        variants = _substitution_guard_variants(inner, stage.loop_var, stage.loop_values)
+        variants = _substitution_guard_variants(
+            inner, stage.loop_var, stage.loop_values, stage.chain_vars
+        )
         if variants is None:
             return sr
         total_variants += len(variants)
@@ -2833,9 +2873,9 @@ def _expand_intra_chain_vars(stages: list[Stage]) -> list[Stage]:
 
     The var map clears on pipe ``|`` (subshell semantics) and is
     preserved across ``&&``, ``||``, and ``;`` to match real bash.
-    Only later consumer stages have their tokens rewritten; the
-    executed command string stored on ``ClassifyResult`` is never
-    touched.
+    Only later consumer stages have their tokens rewritten (and the live
+    map attached as ``chain_vars`` for substitution-guard resolution); the
+    executed command string stored on ``ClassifyResult`` is never touched.
     """
     var_map: dict[str, str] = {}
     rewritten: list[Stage] = []
@@ -2862,15 +2902,13 @@ def _expand_intra_chain_vars(stages: list[Stage]) -> list[Stage]:
                 else:
                     var_map.pop(name, None)
             rewritten.append(stage)
+        elif var_map:
+            new_tokens = [_expand_token(t, var_map) for t in stage.tokens]
+            rewritten.append(
+                replace(stage, tokens=new_tokens, chain_vars=dict(var_map))
+            )
         else:
-            if var_map:
-                new_tokens = [_expand_token(t, var_map) for t in stage.tokens]
-                if new_tokens != list(stage.tokens):
-                    rewritten.append(replace(stage, tokens=new_tokens))
-                else:
-                    rewritten.append(stage)
-            else:
-                rewritten.append(stage)
+            rewritten.append(stage)
 
         if stage.operator == "|":
             var_map.clear()

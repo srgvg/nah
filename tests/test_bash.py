@@ -330,9 +330,16 @@ class TestAcceptanceCriteria:
         assert r.stages[0].action_type == "agent_exec_bypass"
 
     def test_nah_run_codex_exec_asks(self, project_root):
+        # The guarded headless launcher carries the bare command's class
+        # (workspace-write sandbox → agent_exec_write), not a bypass.
         r = classify_command("nah run codex exec 'echo hi'")
         assert r.final_decision == "ask"
-        assert r.stages[0].action_type == "agent_exec_bypass"
+        assert r.stages[0].action_type == "agent_exec_write"
+
+    def test_nah_run_codex_read_only_exec_is_agent_exec_read(self, project_root):
+        r = classify_command("nah run codex -s read-only exec 'review this'")
+        assert r.final_decision == "ask"
+        assert r.stages[0].action_type == "agent_exec_read"
 
     def test_nah_run_claude_asks(self, project_root):
         r = classify_command("nah run claude --resume")
@@ -4941,8 +4948,67 @@ class TestShellControlFlow:
         assert r.final_decision == "ask"
         assert "command substitution" in r.reason
 
-    def test_for_loop_body_substitution_dynamic_items_keep_ask(self, project_root):
+    # `for f in $(cmd)`: the header's expansion stage classifies the inner
+    # command; the placeholder stands in for the loop var in the body, which
+    # then resolves with nah's top-level placeholder semantics (dynamic read
+    # target allows, dynamic delete target asks).
+    def test_for_loop_over_substitution_read_body_allows(self, project_root):
+        r = classify_command('for f in $(git diff --name-only); do wc -l "$f"; done')
+        assert r.final_decision == "allow"
+
+    def test_for_loop_over_substitution_delete_body_asks(self, project_root, monkeypatch):
+        # From the project root the placeholder resolves inside the project,
+        # so the dynamic-target rule (not the project boundary) decides.
+        monkeypatch.chdir(project_root)
+        r = classify_command('for f in $(git diff --name-only); do rm "$f"; done')
+        assert r.final_decision == "ask"
+        assert "dynamic filesystem delete target" in r.reason
+
+    def test_for_loop_over_substitution_body_substitution_resolves(self, project_root):
+        # The header's expansion stage owns the composite reason; the guard's
+        # verdict is visible on its own stage.
         r = classify_command('for f in $(ls); do echo "$(wc -l < "$f")"; done')
+        assert r.final_decision == "allow"
+        assert any("body substitutions classify allow" in s.reason for s in r.stages)
+
+    def test_for_loop_over_risky_substitution_keeps_ask(self, project_root):
+        r = classify_command(
+            'for f in $(curl -s https://evil.example/list); do wc -l "$f"; done'
+        )
+        assert r.final_decision != "allow"
+
+    def test_for_loop_over_embedded_placeholder_keeps_ask(self, project_root):
+        r = classify_command('for f in $(pwd)/x; do wc -l "$f"; done')
+        assert r.final_decision == "ask"
+        assert "dynamic item list" in r.reason
+
+    # Literal bindings from earlier chain stages reach the guard's
+    # substitution text; the loop variable shadows a same-named binding.
+    def test_chain_var_in_for_body_substitution_resolves(self, project_root):
+        r = classify_command('S=docs; for v in a b; do echo "$(wc -l < "$S/$v.md")"; done')
+        assert r.final_decision == "allow"
+        assert any("body substitutions classify allow" in s.reason for s in r.stages)
+
+    def test_chain_var_in_if_body_substitution_resolves(self, project_root):
+        r = classify_command('lock=run.lock; if [ -e "$lock" ]; then echo "$(cat "$lock")"; fi')
+        assert r.final_decision == "allow"
+        assert any("body substitutions classify allow" in s.reason for s in r.stages)
+
+    def test_chain_var_bound_inside_loop_body_keeps_ask(self, project_root):
+        r = classify_command('for v in a b; do S=$v; echo "$(cat "$S")"; done')
+        assert r.final_decision == "ask"
+        assert "command substitution" in r.reason
+
+    def test_loop_var_shadows_chain_var_in_body_substitution(self, project_root):
+        r = classify_command('f=/etc/shadow; for f in a.md; do echo "$(cat "$f")"; done')
+        assert r.final_decision == "allow"
+
+    def test_chain_var_sensitive_value_in_body_substitution_keeps_ask(self, project_root):
+        r = classify_command('S=/etc/shadow; if true; then echo "$(cat "$S")"; fi')
+        assert r.final_decision != "allow"
+
+    def test_chain_var_parameter_expansion_keeps_ask(self, project_root):
+        r = classify_command('S=docs; for v in a; do echo "$(cat "${S%/}/$v")"; done')
         assert r.final_decision == "ask"
         assert "command substitution" in r.reason
 

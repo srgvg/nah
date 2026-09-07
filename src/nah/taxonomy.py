@@ -595,7 +595,9 @@ def _classify_mixed_mode_command(tokens: list[str]) -> str | None:
                     "--security-enable-system-operator",
                 )):
             return UNKNOWN
-        return FILESYSTEM_READ if "eval" in args or "e" in args else None
+        # yq v4 defaults to `eval` when the subcommand is omitted, so every
+        # form without an in-place/split flag only writes to stdout.
+        return FILESYSTEM_READ
     if cmd == "go" and args and args[0] == "env":
         return UNKNOWN if _has_flag(args[1:], "-w", "-u") else FILESYSTEM_READ
     if cmd == "gofmt":
@@ -763,6 +765,15 @@ def classify_tokens(
     # get routes` fails to match a `talosctl get` prefix and falls to unknown.
     if tokens[0] == "talosctl":
         tokens = _strip_talosctl_global_flags(tokens)
+        if global_table:
+            result = _prefix_match(tokens, global_table)
+            if result != UNKNOWN:
+                user_action = result
+
+    # go: strip `-C <dir>` so `go -C <worktree> test ./...` matches the same
+    # `go test` prefix as the bare form (global and builtin tables alike).
+    if tokens[0] == "go":
+        tokens = _strip_go_global_flags(tokens)
         if global_table:
             result = _prefix_match(tokens, global_table)
             if result != UNKNOWN:
@@ -1018,6 +1029,27 @@ def _strip_git_global_flags(tokens: list[str]) -> list[str]:
             result.extend(tokens[i:])
             break
     return result
+
+
+def _strip_go_global_flags(tokens: list[str]) -> list[str]:
+    """Strip ``go -C <dir>`` / ``go -C=<dir>``, go's only pre-subcommand flag.
+
+    Without this ``go -C <worktree> test ./...`` never matches a ``go test``
+    prefix and falls to unknown. The directory is not a boundary check —
+    ``go run <path>`` and ``go test <pkg>`` already classify without one. A
+    malformed form (missing or flag-shaped directory) fails closed by
+    returning the original token stream.
+    """
+    if len(tokens) < 3 or tokens[0] != "go":
+        return tokens
+    flag = tokens[1]
+    if flag == "-C":
+        if len(tokens) < 4 or tokens[2].startswith("-"):
+            return tokens
+        return [tokens[0], *tokens[3:]]
+    if flag.startswith("-C=") and len(flag) > 3:
+        return [tokens[0], *tokens[2:]]
+    return tokens
 
 
 _KUBECTL_SUBCOMMANDS = {
@@ -1297,18 +1329,26 @@ def _classify_kubectl(tokens: list[str], *, global_table: list | None = None) ->
 
     Only low-risk cluster/container inspection paths are allowed. Sensitive
     resources, detailed object dumps, custom resources, mutations, and malformed
-    global flags stay unknown so the user is asked.
+    global flags stay unknown so the user is asked — unless a user prefix in
+    the global table decides them (secret-value reads excepted).
     """
     if not tokens or tokens[0] != "kubectl":
         return None
 
     stripped = _strip_kubectl_global_flags(tokens)
-    if global_table and stripped != tokens:
-        result = _prefix_match(stripped, global_table)
-        if result != UNKNOWN:
-            return result
-    tokens = stripped
+    user_action = _prefix_match(stripped, global_table) if global_table else UNKNOWN
+    action = _classify_kubectl_builtin(stripped)
+    # The conservative built-in is a default, not a floor: a user prefix
+    # (`kubectl get`, `kubectl kustomize`) decides every shape it leaves
+    # unknown, with or without global flags in front of the subcommand. Reads
+    # that expose secret values keep their env_read ask regardless.
+    if action == ENV_READ or user_action == UNKNOWN:
+        return action
+    return user_action
 
+
+def _classify_kubectl_builtin(tokens: list[str]) -> str:
+    """Built-in kubectl opinion on global-flag-stripped tokens."""
     if len(tokens) < 2 or tokens[1].startswith("-"):
         return UNKNOWN
 
@@ -2782,7 +2822,11 @@ def _classify_nah_run_codex(tokens: list[str]) -> str | None:
     if malformed:
         return UNKNOWN
     if len(cleaned) >= 2 and cleaned[1] in {"exec", "e", "review", "cloud"}:
-        return AGENT_EXEC_BYPASS
+        # nah's own headless launcher is the guarded path — it installs the
+        # authority rules and blocks every unresolved ask — so the run carries
+        # the class of the bare command (read-only sandbox → agent_exec_read,
+        # `cloud exec` → agent_exec_remote), never a bypass by itself.
+        return _classify_codex(codex_tokens) or AGENT_EXEC_WRITE
     return AGENT_EXEC_WRITE
 
 

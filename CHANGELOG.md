@@ -82,6 +82,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are now tracked: `'` and `<(` are literal inside them, `$(…)` and
   backticks still substitute.
 
+- **`nah run codex exec|e|review` carries the bare command's class, not
+  `agent_exec_bypass`.** nah's own headless launcher is the guarded path —
+  it installs the authority rules and blocks every unresolved ask — yet it
+  classified stricter than an unguarded `codex exec`. A read-only sandbox
+  lane is now `agent_exec_read`, other lanes `agent_exec_write`, `cloud
+  exec` `agent_exec_remote`; `--yolo`, dangerous permission overrides and
+  nah-owned config overrides remain a bypass.
+
+- **Control-flow guards resolve two more shapes instead of asking.**
+  `for f in $(git diff --name-only); do wc -l "$f"; done` no longer stops at
+  "dynamic item list": the header expansion stage classifies the inner
+  command, and the placeholder stands in for the loop variable in the body,
+  which then follows the top-level placeholder semantics (`rm "$f"` still
+  asks as a dynamic delete target). Literal bindings from earlier chain
+  stages (`S=docs; for v in a b; do echo "$(wc -l < $S/$v)"; done`,
+  `lock=x.lock; if …; then echo "$(cat "$lock")"; fi`) now reach the
+  body-substitution guard's inner text; a binding made inside the body, a
+  parameter-expansion operator or a sensitive value keeps the ask.
+
+- **A user `kubectl` prefix decides the shapes the built-in leaves unknown.**
+  `classify: container_read: [kubectl get]` only took effect when a global
+  flag preceded the subcommand (`kubectl -n x get …`); the bare form fell
+  to the conservative built-in's `unknown`, which the user/semantic merge
+  keeps. The built-in is now a default rather than a floor for both forms
+  (custom resources, `-o json|yaml|jsonpath`, `kubectl kustomize`); secret
+  reads keep `env_read` regardless of any user prefix.
+
+- **`yq` without an in-place flag is `filesystem_read` in every form.** Only
+  `yq eval`/`yq e` were recognised; the v4 default form (`yq '.a' file`,
+  `yq -o=json …`, `yq ea …`) fell to unknown. `-i`/`--inplace`/`--split-exp`
+  still hide nothing.
+
+- **`go -C <dir> …` classifies like the bare `go` command.** The directory
+  flag is stripped before every table lookup, so `go -C <worktree> test
+  ./...` matches `go test`; a malformed `-C` (missing or flag-shaped value)
+  still fails closed.
+
 - **An absolute-path `gh`/`glab`/`curl` binary is host-resolved like the
   bare name.** `~/.local/share/mise/installs/…/bin/gh api graphql … --jq
   '{head: …}'` fell through to the generic URL scan and reported

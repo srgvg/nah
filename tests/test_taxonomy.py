@@ -382,6 +382,74 @@ class TestClassifyTokens:
             profile="none",
         ) == "container_read"
 
+    # A user prefix decides the shapes the conservative built-in leaves
+    # unknown (custom resources, detailed outputs, unmodelled subcommands),
+    # whether or not global flags precede the subcommand.
+    def _kubectl_user_table(self):
+        return build_user_table({
+            "container_read": ["kubectl get"],
+            "filesystem_read": ["kubectl kustomize"],
+        })
+
+    @pytest.mark.parametrize(("tokens", "expected"), [
+        (["kubectl", "get", "widgets.example.com", "-o", "json"], "container_read"),
+        (["kubectl", "-n", "flux-system", "get", "kustomization", "-o", "yaml"], "container_read"),
+        (["kubectl", "get", "ns", "x", "-o", "jsonpath={.metadata.labels}"], "container_read"),
+        (["kubectl", "get", "configmaps"], "container_read"),
+        (["kubectl", "kustomize", "core"], "filesystem_read"),
+        (["kubectl", "--context", "prod", "kustomize", "core"], "filesystem_read"),
+        (["kubectl", "get", "pods"], "container_read"),
+    ])
+    def test_kubectl_user_prefix_decides_unknown_shapes(self, tokens, expected):
+        assert classify_tokens(
+            tokens, global_table=self._kubectl_user_table(), builtin_table=_FULL,
+        ) == expected
+
+    @pytest.mark.parametrize("tokens", [
+        ["kubectl", "get", "secret", "x", "-o", "yaml"],
+        ["kubectl", "-n", "prod", "get", "secrets"],
+        ["kubectl", "get", "pods,secrets"],
+    ])
+    def test_kubectl_secret_reads_keep_env_read_over_user_prefix(self, tokens):
+        assert classify_tokens(
+            tokens, global_table=self._kubectl_user_table(), builtin_table=_FULL,
+        ) == "env_read"
+
+    @pytest.mark.parametrize("tokens", [
+        ["kubectl", "get", "widgets.example.com", "-o", "json"],
+        ["kubectl", "kustomize", "core"],
+        ["kubectl", "-n", "prod", "get", "pods", "-o", "yaml"],
+    ])
+    def test_kubectl_unknown_shapes_stay_unknown_without_user_prefix(self, tokens):
+        assert _ct(tokens) == "unknown"
+
+    # go — `-C <dir>` stripped before every table lookup.
+    @pytest.mark.parametrize(("tokens", "expected"), [
+        (["go", "-C", "/w", "test", "./...", "-count=1"], "package_run"),
+        (["go", "-C=/w", "build", "./..."], "package_install"),
+        (["go", "-C", "/w", "mod", "tidy"], "package_install"),
+        (["go", "-C", "/w", "vet", "./..."], "filesystem_read"),
+        (["go", "test", "./..."], "package_run"),
+    ])
+    def test_go_directory_flag_is_stripped(self, tokens, expected):
+        assert _ct(tokens) == expected
+
+    @pytest.mark.parametrize("tokens", [
+        ["go", "-C", "test", "./..."],
+        ["go", "-C", "-x", "test", "./..."],
+        ["go", "-C=", "test", "./..."],
+        ["go", "-C"],
+    ])
+    def test_go_malformed_directory_flag_fails_closed(self, tokens):
+        assert _ct(tokens) == "unknown"
+
+    def test_go_directory_flag_stripped_before_user_table(self):
+        table = build_user_table({"package_run": ["go generate"]})
+        assert classify_tokens(
+            ["go", "-C", "/w", "generate", "./..."],
+            global_table=table, builtin_table=_FULL,
+        ) == "package_run"
+
     # flux — kubeconfig-style global flags stripped before global-table match.
     # flux has no built-in classifier; the user config supplies the taxonomy.
     def _flux_table(self):
@@ -1938,9 +2006,8 @@ class TestCodexClassifier:
         ["nah", "run", "codex", "--ask-for-approval", "on-request"],
         ["nah", "run", "codex", "--ask-for-approval=on-request"],
         ["nah", "run", "codex", "-a", "never"],
-        ["nah", "run", "codex", "exec", "echo hi"],
-        ["nah", "run", "codex", "review", "--diff"],
-        ["nah", "run", "codex", "cloud", "exec", "echo hi"],
+        ["nah", "run", "codex", "exec", "--yolo", "echo hi"],
+        ["nah", "run", "codex", "cloud", "exec", "--dangerously-bypass-approvals-and-sandbox", "x"],
         ["nah", "run", "codex", "-c", "hooks.PreToolUse=[]"],
         ["nah", "run", "codex", "-c", "hooks.PermissionRequest=[]"],
         ["nah", "run", "codex", "-c", "hooks.PostToolUse=[]"],
@@ -1956,6 +2023,21 @@ class TestCodexClassifier:
     ])
     def test_nah_run_codex_unsafe_forms_are_bypass(self, tokens):
         assert _ct(tokens) == "agent_exec_bypass"
+
+    @pytest.mark.parametrize("tokens, expected", [
+        # nah's own headless launcher is the guarded path (authority rules +
+        # unresolved asks blocked), so it carries the bare command's class.
+        (["nah", "run", "codex", "exec", "echo hi"], "agent_exec_write"),
+        (["nah", "run", "codex", "-s", "read-only", "exec", "review this"], "agent_exec_read"),
+        (["nah", "run", "codex", "exec", "--sandbox", "read-only", "review this"], "agent_exec_read"),
+        (["nah", "run", "codex", "-s", "read-only", "-C", "/repo", "e", "x"], "agent_exec_read"),
+        (["nah", "run", "codex", "--sandbox", "workspace-write", "exec", "x"], "agent_exec_write"),
+        (["nah", "run", "codex", "review", "--diff"], "agent_exec_read"),
+        (["nah", "run", "codex", "cloud", "exec", "echo hi"], "agent_exec_remote"),
+        (["nah", "run", "codex", "cloud", "list"], "agent_read"),
+    ])
+    def test_nah_run_codex_guarded_headless_forms(self, tokens, expected):
+        assert _ct(tokens) == expected
 
     @pytest.mark.parametrize("tokens", [
         ["codex", "sandbox", "read-only", "echo", "hi"],
@@ -3194,6 +3276,9 @@ class TestMixedModeSafetyFloors:
         ("yq eval", ["yq", "eval", "-i", ".foo = 1", "config.yaml"], "unknown"),
         ("yq eval", ["yq", "eval", "-iN", ".foo = 1", "config.yaml"], "unknown"),
         ("yq eval", ["yq", "eval", "--security-enable-system-operator", "system(\"id\")"], "unknown"),
+        ("yq", ["yq", "-i", ".foo = 1", "config.yaml"], "unknown"),
+        ("yq", ["yq", "-o=json", "--inplace", ".foo", "config.yaml"], "unknown"),
+        ("yq", ["yq", "ea", "-i", ".foo", "a.yaml", "b.yaml"], "unknown"),
         ("go env", ["go", "env", "-w", "GOPROXY=https://example.test"], "unknown"),
         ("gofmt -l", ["gofmt", "-l", "-w", "main.go"], "unknown"),
         ("golangci-lint run", ["golangci-lint", "run", "--fix", "./..."], "unknown"),
@@ -3214,6 +3299,11 @@ class TestMixedModeSafetyFloors:
 
     @pytest.mark.parametrize(("tokens", "expected"), [
         (["yq", "eval", ".foo", "config.yaml"], "filesystem_read"),
+        (["yq", ".spec.values", "release.yaml"], "filesystem_read"),
+        (["yq", "-o=json", ".spec.values.backup", "release.yaml"], "filesystem_read"),
+        (["yq", "-r", "select(.kind==\"Deployment\") | .spec", "render.yaml"], "filesystem_read"),
+        (["yq", "ea", "-e", "[.[] | select(.kind == strenv(K))]", "a.yaml", "b.yaml"], "filesystem_read"),
+        (["yq", "-P", "{\"backup\": .}", "values.yaml"], "filesystem_read"),
         (["go", "env", "GOPATH"], "filesystem_read"),
         (["gofmt", "-l", "main.go"], "filesystem_read"),
         (["golangci-lint", "run", "./..."], "filesystem_read"),
