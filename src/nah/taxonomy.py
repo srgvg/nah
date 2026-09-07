@@ -1671,6 +1671,25 @@ _WEBSOCKET_WRITE_WORDS = {
 _WEBSOCKET_DESTRUCTIVE_WORDS = _GRAPHQL_DESTRUCTIVE_WORDS
 
 
+# GitHub GraphQL mutations that are the API twin of `gh pr comment` /
+# `gh pr review --comment`: they add or resolve review conversation and nothing
+# else. Classified as git_remote_write so they follow the same policy as the
+# CLI verbs. Approve/merge/ready/close/delete mutations stay service_write.
+_GRAPHQL_COMMENT_MUTATIONS = frozenset({
+    "addComment",
+    "addDiscussionComment",
+    "addPullRequestReviewComment",
+    "addPullRequestReviewThread",
+    "addPullRequestReviewThreadReply",
+    "minimizeComment",
+    "resolveReviewThread",
+    "unminimizeComment",
+    "unresolveReviewThread",
+    "updateIssueComment",
+    "updatePullRequestReviewComment",
+})
+
+
 def _classify_graphql_operation(tokens: list[str]) -> str | None:
     """Classify visible GraphQL operations by operation intent."""
     op = api_intent.extract_remote_operation(tokens)
@@ -1680,9 +1699,16 @@ def _classify_graphql_operation(tokens: list[str]) -> str | None:
     if _graphql_operation_is_opaque(op):
         return _graphql_conservative_action(op)
 
-    graphql = op.graphql
+    return classify_graphql_intent(op.graphql, op) or _graphql_conservative_action(op)
+
+
+def classify_graphql_intent(
+    graphql: api_intent.GraphQLIntent,
+    op: api_intent.RemoteOperation,
+) -> str | None:
+    """Map a parsed GraphQL document to an action type; None when unreadable."""
     if not graphql.operation_type or graphql.ambiguous_reason:
-        return _graphql_conservative_action(op)
+        return None
 
     if graphql.operation_type in {
         api_intent.GRAPHQL_QUERY,
@@ -1691,25 +1717,41 @@ def _classify_graphql_operation(tokens: list[str]) -> str | None:
         return SERVICE_READ
 
     if graphql.operation_type == api_intent.GRAPHQL_MUTATION:
-        if _graphql_operation_looks_destructive(op):
+        if _graphql_operation_looks_destructive(op, graphql):
             return SERVICE_DESTRUCTIVE
+        if (
+            op.client in {api_intent.CLIENT_GH_API, api_intent.CLIENT_GLAB_API}
+            and graphql.root_fields
+            and all(field in _GRAPHQL_COMMENT_MUTATIONS for field in graphql.root_fields)
+        ):
+            return GIT_REMOTE_WRITE
         return SERVICE_WRITE
 
-    return _graphql_conservative_action(op)
+    return None
 
 
 def _graphql_operation_is_opaque(op: api_intent.RemoteOperation) -> bool:
-    return (
-        op.body_source
-        in {
-            api_intent.BODY_DYNAMIC,
-            api_intent.BODY_FILE,
-            api_intent.BODY_STDIN,
-            api_intent.BODY_REDIRECT,
-            api_intent.BODY_UNKNOWN,
-        }
-        or "malformed JSON body" in op.reasons
-    )
+    if "malformed JSON body" in op.reasons:
+        return True
+    query_items = [item for item in op.body_items if item.key == "query"]
+    if (
+        query_items
+        and all(item.source == api_intent.BODY_INLINE for item in query_items)
+        and op.graphql.operation_type
+        and not op.graphql.ambiguous_reason
+    ):
+        # The document is literal and parsed; the other fields are its
+        # variables (`-F body='...'`), and a variable's value being dynamic
+        # does not hide which operation runs. Substitutions and pipes feeding
+        # those values are the substitution and composition guards' job.
+        return False
+    return op.body_source in {
+        api_intent.BODY_DYNAMIC,
+        api_intent.BODY_FILE,
+        api_intent.BODY_STDIN,
+        api_intent.BODY_REDIRECT,
+        api_intent.BODY_UNKNOWN,
+    }
 
 
 def _graphql_conservative_action(op: api_intent.RemoteOperation) -> str:
@@ -1720,10 +1762,16 @@ def _graphql_conservative_action(op: api_intent.RemoteOperation) -> str:
     return UNKNOWN
 
 
-def _graphql_operation_looks_destructive(op: api_intent.RemoteOperation) -> bool:
+def _graphql_operation_looks_destructive(
+    op: api_intent.RemoteOperation,
+    graphql: api_intent.GraphQLIntent | None = None,
+) -> bool:
+    # *graphql* is the parsed document when it was read from somewhere other
+    # than the command line (a `query=@file` body); op.graphql is empty then.
+    intent = graphql if graphql is not None else op.graphql
     text = "\n".join(
         part
-        for part in (op.operation_name, *op.graphql.root_fields)
+        for part in (op.operation_name, *intent.root_fields)
         if part
     )
     words = _action_words(text)
@@ -1895,11 +1943,49 @@ def _classify_http_rest_operation(tokens: list[str]) -> str | None:
         return SERVICE_DESTRUCTIVE
 
     if method in _REST_WRITE_METHODS:
+        if (
+            op.client in implicit_api_clients
+            and op.host_source == api_intent.HOST_IMPLICIT
+            and _rest_operation_is_forge_comment(op)
+        ):
+            return GIT_REMOTE_WRITE
         if _rest_operation_looks_destructive(op):
             return SERVICE_DESTRUCTIVE
         return SERVICE_WRITE
 
     return UNKNOWN
+
+
+# REST twins of `gh pr comment` / `glab mr note`: create, edit or reply to a
+# comment, or resolve a discussion. Anchored on the full path so `.../merge`,
+# `.../reviews/N/events` and the like never match. A review POST counts only
+# when it does not approve or request changes -- that is `gh pr review`.
+_REST_FORGE_COMMENT_PATH_RE = re.compile(
+    r"^(?:"
+    r"repos/[^/]+/[^/]+/(?:issues|pulls)/\d+/comments"
+    r"|repos/[^/]+/[^/]+/pulls/\d+/comments/\d+/replies"
+    r"|repos/[^/]+/[^/]+/pulls/\d+/reviews"
+    r"|repos/[^/]+/[^/]+/(?:issues|pulls)/comments/\d+"
+    r"|repos/[^/]+/[^/]+/commits/[0-9A-Fa-f]+/comments"
+    r"|projects/[^/]+/(?:merge_requests|issues)/\d+/notes(?:/\d+)?"
+    r"|projects/[^/]+/(?:merge_requests|issues)/\d+/discussions(?:/[^/]+(?:/notes(?:/\d+)?)?)?"
+    r")$"
+)
+_REST_REVIEW_VERDICT_MARKERS = ("approve", "request_changes")
+
+
+def _rest_operation_is_forge_comment(op: api_intent.RemoteOperation) -> bool:
+    path = (op.path or "").split("?", 1)[0].strip("/").removeprefix("api/v4/")
+    if not _REST_FORGE_COMMENT_PATH_RE.match(path):
+        return False
+    if path.endswith("/reviews"):
+        # `event=APPROVE` / `event=REQUEST_CHANGES` is a verdict, not a comment.
+        # Substring on the whole body is deliberately over-inclusive: a review
+        # whose text merely mentions approval falls back to service_write.
+        text = (op.body_text or "").lower()
+        if any(marker in text for marker in _REST_REVIEW_VERDICT_MARKERS):
+            return False
+    return True
 
 
 def _httpie_form_flag_present(tokens: list[str]) -> bool:

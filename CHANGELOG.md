@@ -47,6 +47,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never read the file; the sensitive-path policy still applies to any other
   form and to every real read.
 
+- **Forge comment traffic through `gh api`/`glab api` is `git_remote_write`,
+  not `service_write`.** A GraphQL mutation whose root fields are all
+  comment/review-thread operations (`addComment`,
+  `addPullRequestReviewThreadReply`, `resolveReviewThread`, …) and a REST
+  `POST`/`PUT` to a comment, note, review, reply or discussion endpoint on
+  the CLI's implicit host now classify as `git_remote_write`, so the policy
+  that already governs `gh pr comment` and `glab mr note` governs the raw
+  API form too. Approvals and change requests (`event=APPROVE`,
+  `REQUEST_CHANGES`), merges, PR creation, `DELETE`, any destructive root
+  field, an explicit `--hostname`, and `curl` keep their class.
+
+- **GraphQL documents that use variables are no longer opaque.** A
+  `-f query='mutation($id:ID!){…}'` was flagged as a dynamic shell body
+  because of the `$`, hiding the operation and falling back to
+  `network_write → unknown host`. A `$name` reference inside a parsed
+  GraphQL document, and backticks or `$HOME` inside a GraphQL string
+  literal, are document syntax; shell substitutions, `${…}`, and
+  placeholders still count as dynamic. Opacity is judged on the `query`
+  field only — `-F body=@reply.md` or a `$var` variable value never hides
+  the operation.
+
+- **`-F query=@file` and `--input file.json` are classified from the file.**
+  The document is read from disk (relative to the stage's shell cwd, after
+  `cd … &&`, ≤256 KiB) and gets the same intent mapping as an inline query;
+  a missing, oversized, unparseable or substituted path asks with the
+  reason. Other `@file` fields are variables and are ignored.
+
+- **A double-quoted apostrophe no longer opens a fake single-quoted
+  region.** The substitution scanner tracked single quotes only, so in
+  `'…'"'"'s `code`…'` the shell idiom for an embedded apostrophe made the
+  following backticks a command substitution (`__nah_psub_…` inside a
+  GraphQL body), and `"it's $(…)"` hid a real one. Double-quoted regions
+  are now tracked: `'` and `<(` are literal inside them, `$(…)` and
+  backticks still substitute.
+
+- **An absolute-path `gh`/`glab`/`curl` binary is host-resolved like the
+  bare name.** `~/.local/share/mise/installs/…/bin/gh api graphql … --jq
+  '{head: …}'` fell through to the generic URL scan and reported
+  `host: {head`.
+
 - **`nah run codex` preserves the saved approval reviewer.** The launcher no
   longer forces `approvals_reviewer="user"` or rejects explicit reviewer
   overrides. Codex config/profile defaults can select `"auto_review"`

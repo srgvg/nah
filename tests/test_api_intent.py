@@ -366,6 +366,48 @@ class TestApiCliExtraction:
         assert op.body_source == BODY_FILE
         assert op.confidence == CONFIDENCE_OPAQUE
 
+    def test_gh_api_graphql_variables_are_not_shell_dynamic(self):
+        # `$id` is a GraphQL variable fed by `-F id=`; the document is literal.
+        op = _op(
+            "gh api graphql -F id=PRRT_x -f 'query=mutation($id: ID!) "
+            "{ resolveReviewThread(input: {threadId: $id}) { thread { id } } }'"
+        )
+
+        assert op.body_source == BODY_INLINE
+        assert op.graphql.operation_type == GRAPHQL_MUTATION
+        assert op.graphql.root_fields == ("resolveReviewThread",)
+
+    def test_gh_api_graphql_string_literal_may_carry_shell_looking_text(self):
+        # Backticks and `$` inside a GraphQL string literal are the comment's
+        # own text; the bash pipeline turned any real substitution into a
+        # `__nah_` placeholder before this point.
+        op = extract_remote_operation([
+            "gh", "api", "graphql", "-f",
+            (
+                'query=mutation{a:addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"T",'
+                'body:"Confirmed. `w.skipped` is a set now, see $HOME/x"}){comment{id}}}'
+            ),
+        ])
+
+        assert op is not None
+        assert op.body_source == BODY_INLINE
+        assert op.graphql.root_fields == ("addPullRequestReviewThreadReply",)
+
+    @pytest.mark.parametrize("query", [
+        "$Q",
+        "$(cat q.graphql)",
+        "mutation($id: ID!) { x(input: {a: ${B}}) { id } }",
+        "mutation($id: ID!) { x(input: {a: `cat x`}) { id } }",
+        'mutation { x(input: {a: "__nah_psub_0__"}) { id } }',
+        "mutation($1) { x { id } }",
+        "$id { viewer { login } }",
+    ])
+    def test_gh_api_graphql_shell_dynamic_query_stays_dynamic(self, query):
+        op = extract_remote_operation(["gh", "api", "graphql", "-f", f"query={query}"])
+
+        assert op is not None
+        assert op.body_source == BODY_DYNAMIC
+
     def test_glab_api_hostname_and_endpoint(self):
         op = _op("glab api projects/1 --hostname gitlab.example.com")
 

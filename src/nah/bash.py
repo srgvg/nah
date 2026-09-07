@@ -894,12 +894,16 @@ def _extract_substitutions(command: str) -> list[tuple[str, int, int, str]]:
     Returns a list of ``(inner_command, start, end, kind)`` tuples where
     *kind* is one of ``"process_in"``, ``"process_out"``, ``"command"``,
     ``"backtick"``, or ``"failed"`` (unbalanced parens — fail-closed).
-    Single-quoted regions are skipped (literal text).
+    Single-quoted regions are skipped (literal text). Inside a double-quoted
+    region an apostrophe is literal (so the ``'"'"'`` idiom does not open a
+    fake single-quoted region), ``<(``/``>(`` and heredocs are literal, while
+    ``$(...)`` and backticks still substitute.
     Arithmetic expansion ``$((...))`` is skipped (not a command).
     """
     results: list[tuple[str, int, int, str]] = []
     i = 0
     n = len(command)
+    in_double = False
     while i < n:
         c = command[i]
         # Heredoc bodies are opaque literal content. Skip past them before
@@ -907,7 +911,8 @@ def _extract_substitutions(command: str) -> list[tuple[str, int, int, str]]:
         # open a fake quoted region. Must come before the single-quote
         # skip below.
         if (
-            c == "<"
+            not in_double
+            and c == "<"
             and i + 1 < n
             and command[i + 1] == "<"
             and (i + 2 >= n or command[i + 2] != "<")
@@ -917,9 +922,13 @@ def _extract_substitutions(command: str) -> list[tuple[str, int, int, str]]:
                 i = new_i
                 continue
         # Skip single-quoted regions entirely
-        if c == "'":
+        if c == "'" and not in_double:
             j = command.find("'", i + 1)
             i = j + 1 if j >= 0 else n
+            continue
+        if c == '"':
+            in_double = not in_double
+            i += 1
             continue
         # Skip backslash-escaped characters
         if c == "\\" and i + 1 < n:
@@ -942,8 +951,8 @@ def _extract_substitutions(command: str) -> list[tuple[str, int, int, str]]:
             results.append(("", i, i + 2, "failed"))
             i += 2
             continue
-        # <(...) or >(...) process substitution
-        if c in "<>" and i + 1 < n and command[i + 1] == "(":
+        # <(...) or >(...) process substitution — literal inside double quotes
+        if c in "<>" and not in_double and i + 1 < n and command[i + 1] == "(":
             kind = "process_in" if c == "<" else "process_out"
             close = _match_parens(command, i + 1)
             if close >= 0:
@@ -5769,8 +5778,108 @@ def _resolve_context(
             return taxonomy.ASK, "script path after shell cwd change"
         if target_path is None:
             inline_code = _extract_inline_code(tokens)
+    elif action_type == taxonomy.NETWORK_WRITE:
+        file_backed = _resolve_graphql_file_query_context(
+            tokens,
+            shell_cwd=shell_cwd,
+            shell_cwd_unknown=shell_cwd_unknown,
+        )
+        if file_backed is not None:
+            return file_backed
     return context.resolve_context(action_type, tokens=tokens, target_path=target_path,
                                    inline_code=inline_code)
+
+
+_GRAPHQL_FILE_QUERY_MAX_BYTES = 256 * 1024
+
+
+def _resolve_graphql_file_query_context(
+    tokens: list[str],
+    *,
+    shell_cwd: str = "",
+    shell_cwd_unknown: bool = False,
+) -> tuple[str, str] | None:
+    """Resolve `gh api graphql -F query=@file` by reading the document.
+
+    A file-sourced query is opaque to the token classifier, so it lands in
+    network_write with "unknown host". The file is local and readable at
+    classification time — the same trust nah already extends to a script path
+    for lang_exec — so parse it and apply the inline GraphQL policy: queries are
+    service_read, comment-class mutations git_remote_write, other mutations
+    service_write/service_destructive. Returns None when the command is not
+    that shape; asks when the file cannot be read or parsed.
+    """
+    from nah import api_intent
+
+    op = api_intent.extract_remote_operation(tokens)
+    if op is None or op.protocol != api_intent.PROTOCOL_GRAPHQL:
+        return None
+    if op.client not in {api_intent.CLIENT_GH_API, api_intent.CLIENT_GLAB_API}:
+        return None
+    if op.host:
+        return None  # explicit host: leave to the host policy
+    # The document is either `-F query=@file` or the whole body via
+    # `--input file`. Other file-backed fields (`-F body=@reply.md`) are the
+    # document's variables and do not carry intent.
+    query_items = [item for item in op.body_items if item.key == "query"]
+    input_items = [
+        item for item in op.body_items
+        if item.key == "" and item.format == api_intent.FORMAT_JSON
+        and item.source == api_intent.BODY_FILE
+    ]
+    if len(query_items) == 1 and not input_items:
+        if query_items[0].source != api_intent.BODY_FILE:
+            return None
+        raw_path = query_items[0].value[1:]  # strip the leading '@'
+        json_body = False
+    elif len(input_items) == 1 and not query_items:
+        raw_path = input_items[0].value
+        json_body = True
+    else:
+        return None
+    if not raw_path or raw_path == "-":
+        return None
+    if "$" in raw_path or "`" in raw_path or _PSUB_PREFIX in raw_path:
+        return taxonomy.ASK, f"graphql query file is dynamic: {raw_path}"
+    resolved = _path_for_shell_cwd(raw_path, shell_cwd, shell_cwd_unknown)
+    if resolved is None:
+        return taxonomy.ASK, "graphql query file after shell cwd change"
+    resolved = os.path.expanduser(resolved)
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_GRAPHQL_FILE_QUERY_MAX_BYTES + 1)
+    except OSError as exc:
+        return taxonomy.ASK, f"graphql query file not readable: {raw_path} ({exc.strerror})"
+    if len(text) > _GRAPHQL_FILE_QUERY_MAX_BYTES:
+        return taxonomy.ASK, f"graphql query file too large: {raw_path}"
+    operation_name = ""
+    if json_body:
+        import json
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return taxonomy.ASK, f"graphql query file not parseable: {raw_path}"
+        if not isinstance(payload, dict) or not isinstance(payload.get("query"), str):
+            return taxonomy.ASK, f"graphql query file not parseable: {raw_path}"
+        text = payload["query"]
+        name = payload.get("operationName")
+        operation_name = name if isinstance(name, str) else ""
+    graphql = api_intent.parse_graphql_document(text, operation_name=operation_name)
+    action = taxonomy.classify_graphql_intent(graphql, op)
+    if action is None:
+        return taxonomy.ASK, f"graphql query file not parseable: {raw_path}"
+    from nah.config import get_config  # lazy import to avoid circular
+
+    fields = ",".join(graphql.root_fields) or graphql.operation_type
+    origin = f"graphql {graphql.operation_type} {fields} from {raw_path}"
+    policy = taxonomy.get_policy(action, get_config().actions)
+    if policy == taxonomy.CONTEXT:
+        decision, reason = context.resolve_context(action, tokens=tokens)
+        return decision, f"{reason} ({origin})"
+    if policy not in (taxonomy.ALLOW, taxonomy.ASK, taxonomy.BLOCK):
+        policy = taxonomy.ASK
+    return policy, f"{action} → {policy} ({origin})"
 
 
 def _extract_primary_target(tokens: list[str]) -> str:

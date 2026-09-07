@@ -538,7 +538,10 @@ def extract_host(tokens: list[str]) -> str | None:
     if not tokens:
         return None
 
-    cmd = tokens[0]
+    # An absolute-path binary (mise install dir, /usr/bin/curl) is the same
+    # client; without this the fallback URL scan picks a host out of a --jq
+    # expression or a field value.
+    cmd = taxonomy._normalize_command_name(tokens[0])
     args = tokens[1:]
 
     if cmd in ("gh", "glab") and args[:1] == ["api"]:

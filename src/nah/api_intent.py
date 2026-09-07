@@ -1218,7 +1218,47 @@ def _parse_api_field(tok: str, tokens: list[str], idx: int) -> tuple[BodyItem, i
         source = BODY_INLINE if value is not None and not _looks_dynamic(value) else source
     if key == "query" and value:
         fmt = FORMAT_GRAPHQL
+        if source == BODY_DYNAMIC and _graphql_document_with_variables(value):
+            source = BODY_INLINE
     return BodyItem(key=key, value=value or "", source=source, format=fmt), consumed
+
+
+_GRAPHQL_VARIABLE_REF_RE = re.compile(r"\$(?![A-Za-z_])")
+_GRAPHQL_STRING_LITERAL_RE = re.compile(r'"""(?:[^"]|"(?!""))*"""|"(?:\\.|[^"\\])*"')
+_PLACEHOLDER_MARKER = "__nah_"
+
+
+def _graphql_document_with_variables(value: str) -> bool:
+    """True when the `$`/backticks in *value* are GraphQL, not shell syntax.
+
+    `mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) ... }`
+    is the documented way to pass `-F id=...` into a query, and the shell
+    never sees those `$id`s expanded because the document is single-quoted.
+    The operation type and root fields are literal either way, which is what
+    the classifier needs.
+
+    Outside GraphQL string literals only `$identifier` may appear, and only
+    after the first `(` or `{` (a `$` before that is shell text the parser
+    would skip). Inside a string literal, backticks and `$` are the comment
+    body's own text -- the bash pipeline has already replaced every real
+    substitution with a `__nah_` placeholder, which stays dynamic.
+    """
+    if _PLACEHOLDER_MARKER in value:
+        return False
+    stripped = _GRAPHQL_STRING_LITERAL_RE.sub('""', value)
+    if any(marker in stripped for marker in _DYNAMIC_MARKERS):
+        return False
+    if _GRAPHQL_VARIABLE_REF_RE.search(stripped):
+        return False
+    first_scope = min(
+        (idx for idx in (stripped.find("("), stripped.find("{")) if idx >= 0),
+        default=-1,
+    )
+    dollar = stripped.find("$")
+    if first_scope < 0 or (dollar >= 0 and dollar < first_scope):
+        return False
+    intent = parse_graphql_document(value)
+    return bool(intent.operation_type) and not intent.ambiguous_reason
 
 
 def _split_payload(payload: str | None) -> tuple[str, str | None]:

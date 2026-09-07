@@ -837,6 +837,111 @@ class TestClassifyTokens:
 
     @pytest.mark.parametrize("tokens", [
         [
+            "gh", "api", "graphql", "-f",
+            'query=mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: "T", body: "x"}) { comment { id } } }',
+        ],
+        [
+            "gh", "api", "graphql", "-f",
+            'query=mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }',
+            "-F", "id=PRRT_x",
+        ],
+        [
+            "gh", "api", "graphql", "-f",
+            (
+                'query=mutation { addComment(input: {subjectId: "I", body: "x"}) { clientMutationId } '
+                'unresolveReviewThread(input: {threadId: "T"}) { thread { id } } }'
+            ),
+        ],
+    ])
+    def test_graphql_comment_mutation_is_git_remote_write(self, tokens):
+        # Same class as `gh pr comment` -- review conversation, not repo state.
+        assert _ct(tokens) == "git_remote_write"
+
+    def test_graphql_literal_query_with_dynamic_variable_value_keeps_intent(self):
+        # Comment prose often carries backticks or `$var`; that makes the
+        # *value* dynamic, not the operation.
+        assert _ct([
+            "gh", "api", "graphql",
+            "-f", "threadId=PRRT_x",
+            "-f", "body=see `check-doc-gate.sh:339` and $f",
+            "-f", (
+                "query=mutation($threadId: ID!, $body: String!) { addPullRequestReviewThreadReply("
+                "input: {pullRequestReviewThreadId: $threadId, body: $body}) { comment { id } } }"
+            ),
+        ]) == "git_remote_write"
+
+    @pytest.mark.parametrize("tokens", [
+        ["gh", "api", "graphql", "-f", "query=$Q", "-f", "body=hi"],
+        ["gh", "api", "graphql", "-F", "query=@q.graphql", "-f", "body=hi"],
+    ])
+    def test_graphql_dynamic_query_stays_network_write(self, tokens):
+        assert _ct(tokens) == "network_write"
+
+    @pytest.mark.parametrize("tokens", [
+        [
+            "gh", "api", "graphql", "-f",
+            'query=mutation { mergePullRequest(input: {pullRequestId: "P"}) { pullRequest { id } } }',
+        ],
+        [
+            "gh", "api", "graphql", "-f",
+            'query=mutation { markPullRequestReadyForReview(input: {pullRequestId: "P"}) { pullRequest { id } } }',
+        ],
+        [
+            "gh", "api", "graphql", "-f",
+            (
+                'query=mutation { resolveReviewThread(input: {threadId: "T"}) { thread { id } } '
+                'closePullRequest(input: {pullRequestId: "P"}) { pullRequest { id } } }'
+            ),
+        ],
+        [
+            "curl", "--json",
+            '{"query":"mutation { addComment(input: {subjectId: \\"I\\", body: \\"x\\"}) { clientMutationId } }"}',
+            "https://api.github.com/graphql",
+        ],
+    ])
+    def test_graphql_comment_mutation_needs_gh_client_and_only_comment_fields(self, tokens):
+        assert _ct(tokens) == "service_write"
+
+    def test_graphql_comment_mutation_with_destructive_field_stays_destructive(self):
+        assert _ct([
+            "gh", "api", "graphql", "-f",
+            (
+                'query=mutation { resolveReviewThread(input: {threadId: "T"}) { thread { id } } '
+                'deleteIssueComment(input: {id: "C"}) { clientMutationId } }'
+            ),
+        ]) == "service_destructive"
+
+    @pytest.mark.parametrize("tokens", [
+        ["gh", "api", "-X", "POST", "repos/o/r/issues/1/comments", "-f", "body=hi"],
+        ["gh", "api", "repos/o/r/pulls/7/comments/12/replies", "-f", "body=ok"],
+        ["gh", "api", "--method", "PATCH", "/repos/o/r/issues/comments/99", "-f", "body=edit"],
+        ["gh", "api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=COMMENT", "-f", "body=notes"],
+        ["gh", "api", "-X", "POST", "repos/o/r/commits/abc123/comments", "-f", "body=hi"],
+        # A comment *about* deleting something is still a comment.
+        ["gh", "api", "-X", "POST", "repos/o/r/issues/1/comments", "-f", "body=I will delete the stale branch"],
+        ["glab", "api", "-X", "POST", "projects/:id/merge_requests/187/notes", "-f", "body=hi"],
+        ["glab", "api", "-X", "PUT", "projects/g%2Fp/merge_requests/187/discussions/abc", "-f", "resolved=true"],
+        ["glab", "api", "projects/:id/merge_requests/187/discussions/abc/notes", "-X", "POST", "-f", "body=r"],
+        ["glab", "api", "-X", "POST", "/api/v4/projects/1/issues/2/notes", "-f", "body=hi"],
+    ])
+    def test_rest_forge_comment_is_git_remote_write(self, tokens):
+        assert _ct(tokens) == "git_remote_write"
+
+    @pytest.mark.parametrize("tokens,expected", [
+        (["gh", "api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=APPROVE", "-f", "body=lgtm"], "service_write"),
+        (["gh", "api", "-X", "POST", "repos/o/r/pulls/5/reviews", "-f", "event=REQUEST_CHANGES"], "service_write"),
+        (["gh", "api", "-X", "PUT", "repos/o/r/pulls/5/merge", "-f", "merge_method=squash"], "service_write"),
+        (["gh", "api", "-X", "POST", "repos/o/r/pulls", "-f", "title=x", "-f", "head=b", "-f", "base=main"], "service_write"),
+        (["gh", "api", "-X", "POST", "repos/o/r/pulls/5/reviews/9/events", "-f", "event=APPROVE"], "service_write"),
+        (["gh", "api", "-X", "DELETE", "repos/o/r/issues/comments/99"], "service_destructive"),
+        (["glab", "api", "-X", "PUT", "projects/:id/merge_requests/187", "-f", "title=ready"], "service_write"),
+        (["gh", "api", "--hostname", "ghe.example.com", "-X", "POST", "repos/o/r/issues/1/comments", "-f", "body=hi"], "service_write"),
+    ])
+    def test_rest_forge_non_comment_writes_keep_their_class(self, tokens, expected):
+        assert _ct(tokens) == expected
+
+    @pytest.mark.parametrize("tokens", [
+        [
             "curl", "--json", '{"query":"mutation DeleteUser { deleteUser(id: 1) { id } }"}',
             "https://api.example.com/graphql",
         ],

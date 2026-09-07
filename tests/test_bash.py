@@ -4183,6 +4183,201 @@ class TestFD022Regressions:
         assert r.final_decision == "block"
         assert r.composition_rule == "network | exec"
 
+
+class TestGraphQLQueryFromFile:
+    """`gh api graphql -F query=@file` is classified from the file's contents.
+
+    The body is opaque to the token classifier, so the stage lands in
+    network_write; the resolver reads the local document and applies the same
+    intent mapping as an inline `-f query=`.
+    """
+
+    QUERY = (
+        "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
+        "{pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved}}}}}"
+    )
+    REPLY = (
+        "mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply("
+        "input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}"
+    )
+    MERGE = "mutation($id:ID!){mergePullRequest(input:{pullRequestId:$id}){pullRequest{id}}}"
+    MIXED = (
+        "mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id}} "
+        "deleteIssue(input:{issueId:$id}){clientMutationId}}"
+    )
+
+    @staticmethod
+    def _doc(tmp_path, name, body):
+        path = tmp_path / name
+        path.write_text(body)
+        return str(path)
+
+    def test_query_document_allows_as_service_read(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"gh api graphql -F query=@{path} -F owner=o -F name=r -F number=1")
+        assert r.final_decision == "allow"
+        assert r.stages[0].action_type == "network_write"
+        assert "implicit API host" in r.reason
+        assert "graphql query repository" in r.reason
+
+    def test_comment_mutation_document_follows_git_remote_write_policy(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "reply.graphql", self.REPLY)
+        r = classify_command(f"gh api graphql -F query=@{path} -F t=PRRT_x -F b=hi")
+        assert r.final_decision == "ask"  # built-in git_remote_write policy
+        assert "git_remote_write → ask" in r.reason
+        assert "addPullRequestReviewThreadReply" in r.reason
+
+    def test_comment_mutation_document_allows_when_git_remote_write_allowed(
+        self, project_root, tmp_path,
+    ):
+        from nah import config
+        from nah.config import NahConfig, reset_config
+
+        reset_config()
+        config._cached_config = NahConfig(actions={"git_remote_write": "allow"})
+        path = self._doc(tmp_path, "reply.graphql", self.REPLY)
+        r = classify_command(f"gh api graphql -F query=@{path} -F t=PRRT_x -F b=hi")
+        assert r.final_decision == "allow"
+        assert "git_remote_write → allow" in r.reason
+
+    def test_file_backed_variables_do_not_hide_the_query_document(self, project_root, tmp_path):
+        # `-F body=@reply.md` is a variable value read from disk; only the
+        # `query` item carries intent. The real log shape from review lanes.
+        body = self._doc(tmp_path, "reply.md", "see `check.sh:339` and $HOME\n")
+        path = self._doc(tmp_path, "reply.graphql", self.REPLY)
+        r = classify_command(f"gh api graphql -F t=PRRT_x -F b=@{body} -F query=@{path}")
+        assert r.final_decision == "ask"
+        assert "git_remote_write → ask" in r.reason
+        assert "addPullRequestReviewThreadReply" in r.reason
+
+    def test_inline_mutation_with_embedded_apostrophe_and_backticks(self, project_root):
+        # Real log shape: a comment body carrying `code` spans and the
+        # '"'"' apostrophe idiom, in a single-quoted -f query=...  Neither
+        # the backticks nor the apostrophe are shell syntax here.
+        cmd = (
+            "mise exec -- gh api graphql -f query='mutation{a:addPullRequestReviewThreadReply("
+            "input:{pullRequestReviewThreadId:\"PRRT_x\",body:\"that module'\"'\"'s own marker, "
+            "see `UnmarkedModules` and `plugin-barman-cloud`.\"}){clientMutationId} }' "
+            "--jq '.data.a.clientMutationId' 2>&1 | tail -3"
+        )
+        r = classify_command(cmd)
+        assert r.final_decision == "ask"  # built-in git_remote_write policy
+        assert "git_remote_write → ask" in r.reason
+        assert "__nah_psub_" not in r.stages[0].tokens[-1]
+
+    def test_two_query_items_are_not_resolved(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"gh api graphql -F query=@{path} -f query='mutation{{x}}'")
+        assert r.final_decision == "ask"
+        assert "graphql query" not in r.reason
+
+    def test_other_mutation_document_asks_as_service_write(self, project_root, tmp_path):
+        from nah import config
+        from nah.config import NahConfig, reset_config
+
+        reset_config()
+        config._cached_config = NahConfig(actions={"git_remote_write": "allow"})
+        path = self._doc(tmp_path, "merge.graphql", self.MERGE)
+        r = classify_command(f"gh api graphql -F query=@{path} -F id=PR_x")
+        assert r.final_decision == "ask"
+        assert "service_write → ask" in r.reason
+        assert "mergePullRequest" in r.reason
+
+    def test_destructive_field_in_document_asks_as_service_destructive(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "mixed.graphql", self.MIXED)
+        r = classify_command(f"gh api graphql -F query=@{path} -F id=X")
+        assert r.final_decision == "ask"
+        assert "service_destructive → ask" in r.reason
+
+    def test_unparseable_document_asks(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "garbage.graphql", "this is not graphql {{{")
+        r = classify_command(f"gh api graphql -F query=@{path}")
+        assert r.final_decision == "ask"
+        assert "graphql query file not parseable" in r.reason
+
+    def test_missing_document_asks(self, project_root, tmp_path):
+        r = classify_command(f"gh api graphql -F query=@{tmp_path}/missing.graphql")
+        assert r.final_decision == "ask"
+        assert "graphql query file not readable" in r.reason
+
+    def test_oversized_document_asks(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "big.graphql", "{ viewer { login } }" + " " * (256 * 1024))
+        r = classify_command(f"gh api graphql -F query=@{path}")
+        assert r.final_decision == "ask"
+        assert "graphql query file too large" in r.reason
+
+    def test_relative_document_resolves_against_shell_cwd(self, project_root, tmp_path):
+        self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"cd {tmp_path} && gh api graphql -F query=@threads.graphql")
+        assert r.final_decision == "allow"
+        assert r.stages[-1].action_type == "network_write"
+        assert r.stages[-1].decision == "allow"
+
+    def test_relative_document_without_cwd_uses_process_cwd(self, project_root, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command("gh api graphql -F query=@threads.graphql")
+        assert r.final_decision == "allow"
+
+    def test_document_under_mise_exec_resolves(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"mise exec -- gh api graphql -F query=@{path}")
+        assert r.final_decision == "allow"
+        assert "implicit API host" in r.reason
+
+    def test_explicit_host_is_left_to_host_policy(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"gh api --hostname ghe.example.com graphql -F query=@{path}")
+        assert r.final_decision == "ask"
+        assert "ghe.example.com" in r.reason
+
+    def test_curl_file_body_is_not_resolved(self, project_root, tmp_path):
+        path = self._doc(tmp_path, "threads.graphql", self.QUERY)
+        r = classify_command(f"curl -d @{path} https://api.github.com/graphql")
+        assert r.stages[0].action_type == "network_write"
+        assert "graphql" not in r.reason
+
+    def test_input_json_body_query_allows(self, project_root, tmp_path):
+        import json
+
+        path = self._doc(tmp_path, "q.json", json.dumps({"query": self.QUERY, "variables": {"number": 1}}))
+        r = classify_command(f"gh api graphql --input {path}")
+        assert r.final_decision == "allow"
+        assert "implicit API host" in r.reason
+        assert "graphql query repository" in r.reason
+
+    def test_input_json_body_comment_mutation_follows_git_remote_write(self, project_root, tmp_path):
+        import json
+
+        path = self._doc(tmp_path, "reply.json", json.dumps({"query": self.REPLY, "variables": {"t": "x", "b": "y"}}))
+        r = classify_command(f"gh api graphql --input {path} 2>&1 | tail -3")
+        assert r.final_decision == "ask"
+        assert "git_remote_write → ask" in r.reason
+        assert "addPullRequestReviewThreadReply" in r.reason
+
+    def test_input_json_body_operation_name_selects_operation(self, project_root, tmp_path):
+        import json
+
+        path = self._doc(tmp_path, "multi.json", json.dumps({
+            "operationName": "Threads",
+            "query": "query Threads { viewer { login } } " + self.MERGE.replace("mutation(", "mutation Merge("),
+        }))
+        r = classify_command(f"gh api graphql --input {path}")
+        assert r.final_decision == "allow"
+        assert "graphql query viewer" in r.reason
+
+    @pytest.mark.parametrize("body", ["not json", '["query"]', '{"variables": {}}', '{"query": 5}'])
+    def test_input_json_body_without_query_asks(self, project_root, tmp_path, body):
+        path = self._doc(tmp_path, "bad.json", body)
+        r = classify_command(f"gh api graphql --input {path}")
+        assert r.final_decision == "ask"
+        assert "graphql query file not parseable" in r.reason
+
+    def test_input_stdin_is_not_resolved(self, project_root, tmp_path):
+        r = classify_command("gh api graphql --input -")
+        assert r.final_decision == "ask"
+        assert "graphql query file" not in r.reason
+
     def test_grpc_known_host_read_allows(self, project_root):
         r = classify_command("grpcurl github.com:443 pkg.User/GetUser")
         assert r.final_decision == "allow"
@@ -5050,6 +5245,24 @@ class TestExtractSubstitutions:
         assert len(proc) == 1
         # The ) inside quotes should not close the process sub
         assert 'echo "hello)"' == proc[0][0]
+
+    def test_apostrophe_inside_double_quotes_is_literal(self):
+        from nah.bash import _extract_substitutions
+        # The apostrophe must not open a single-quoted region that hides $(date)
+        result = _extract_substitutions('echo "it\'s $(date)"')
+        assert [r[0] for r in result if r[3] == "command"] == ["date"]
+
+    def test_embedded_apostrophe_idiom_keeps_single_quotes_literal(self):
+        from nah.bash import _extract_substitutions
+        # 'a'"'"'b' is one single-quoted word with an embedded apostrophe;
+        # the backticks and $(...) after it are still inside single quotes.
+        result = _extract_substitutions("""echo 'module'"'"'s `code` and $(x)'""")
+        assert result == []
+
+    def test_process_sub_inside_double_quotes_is_literal(self):
+        from nah.bash import _extract_substitutions
+        result = _extract_substitutions('echo "<(ls)" `date`')
+        assert [(r[0], r[3]) for r in result] == [("date", "backtick")]
 
 
 # --- nah-2zt: shell comment parsing ---

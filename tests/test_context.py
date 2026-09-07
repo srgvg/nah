@@ -402,6 +402,14 @@ class TestExtractHost:
     def test_api_cli_url_endpoint_host(self):
         assert extract_host(["glab", "api", "https://gitlab.example.com/api/v4/projects/1"]) == "gitlab.example.com"
 
+    def test_api_cli_absolute_path_binary_ignores_jq_expression(self):
+        # A mise-installed gh is the same client; the --jq value is not a host.
+        assert extract_host([
+            "/home/u/.local/share/mise/installs/github-cli/2.100.0/bin/gh", "api", "graphql",
+            "-f", "query={viewer{login}}", "--jq", "{head: .data.viewer.login}",
+        ]) is None
+        assert extract_host(["/usr/bin/curl", "https://example.com/path"]) == "example.com"
+
 
 # --- FD-086: SSH/SCP host extraction ---
 
