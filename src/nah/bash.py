@@ -6115,6 +6115,47 @@ def _resolve_module_path(
     return None
 
 
+# test(1) operators that only stat their operand (or compare strings/integers).
+# Anything else — `-v`, `-o optname`, or an unknown operator — is not exempted.
+_FILE_METADATA_TEST_UNARY = frozenset({
+    "-e", "-f", "-d", "-s", "-L", "-h", "-r", "-w", "-x", "-S", "-p", "-b", "-c",
+    "-k", "-u", "-g", "-O", "-G", "-N", "-t", "-z", "-n",
+})
+_FILE_METADATA_TEST_BINARY = frozenset({
+    "-nt", "-ot", "-ef", "=", "==", "!=", "-eq", "-ne", "-lt", "-le", "-gt", "-ge",
+})
+_FILE_METADATA_TEST_CONNECTIVES = frozenset({"!", "-a", "-o", "&&", "||", "(", ")", "]", "]]"})
+
+
+def _is_file_metadata_test(tokens: list[str]) -> bool:
+    """True for `test`/`[`/`[[` expressions built only from stat-style operators."""
+    if len(tokens) < 2:
+        return False
+    if taxonomy._normalize_command_name(tokens[0]) not in {"test", "[", "[["}:
+        return False
+    expect_operand = False
+    saw_operator = False
+    for tok in tokens[1:]:
+        if expect_operand:
+            expect_operand = False
+            continue
+        if tok in _FILE_METADATA_TEST_CONNECTIVES:
+            continue
+        if tok in _FILE_METADATA_TEST_UNARY:
+            expect_operand = True
+            saw_operator = True
+            continue
+        if tok in _FILE_METADATA_TEST_BINARY:
+            expect_operand = True
+            saw_operator = True
+            continue
+        if tok.startswith("-"):
+            return False
+        # A bare operand (left side of a binary operator, or a string truth test).
+        continue
+    return saw_operator and not expect_operand
+
+
 def _check_extracted_paths(
     tokens: list[str],
     *,
@@ -6134,6 +6175,10 @@ def _check_extracted_paths(
         and taxonomy._normalize_command_name(tokens[0]) == "find"
         and "-delete" not in tokens
     )
+    # `test -f ~/.netrc` stats the path; it never reads it. Existence of a
+    # well-known secrets file is not the secret, so the sensitive-path policy
+    # (which guards contents) does not apply to a pure file-metadata test.
+    metadata_only = _is_file_metadata_test(tokens)
 
     for tok in tokens[1:]:
         check_tok = _glued_input_redirect_target(tok) or tok
@@ -6189,6 +6234,8 @@ def _check_extracted_paths(
                 # Check allow_paths exemption (same as check_path does for file tools)
                 if is_path_allowed(resolved_check, project_root):
                     continue  # exempted
+                if metadata_only:
+                    continue
                 if decision == taxonomy.BLOCK:
                     block_result = (taxonomy.BLOCK, reason)
                 elif ask_result is None:
@@ -6206,13 +6253,21 @@ def _check_composition(stage_results: list[StageResult], stages: list[Stage]) ->
     if len(stage_results) < 2:
         return "", "", ""
 
+    # Data-flow taint carried along a contiguous pipe chain, so a filter between
+    # the source and the sink (`curl … | jq . | bash`) does not launder it.
+    network_tainted = decode_tainted = read_tainted = False
+
     for i in range(len(stage_results) - 1):
         # Only check pipe compositions (not && or ||)
         if i < len(stages) and stages[i].operator != "|":
+            network_tainted = decode_tainted = read_tainted = False
             continue
 
         left = stage_results[i]
         right = stage_results[i + 1]
+        network_tainted = network_tainted or _is_network_data_flow_stage(left)
+        decode_tainted = decode_tainted or taxonomy.is_decode_stage(left.tokens)
+        read_tainted = read_tainted or left.action_type == taxonomy.FILESYSTEM_READ
 
         # sensitive_read | network → block/ask (exfiltration). If a user has
         # explicitly desensitized the source path, preserve that read policy
@@ -6222,20 +6277,20 @@ def _check_composition(stage_results: list[StageResult], stages: list[Stage]) ->
             decision = taxonomy.ASK if left.decision == taxonomy.ALLOW else taxonomy.BLOCK
             return decision, f"data exfiltration: {right.tokens[0]} receives sensitive input", "sensitive_read | network"
 
-        right_is_exec_sink = _is_exec_sink_stage(right)
+        right_is_exec_sink = _is_exec_sink_stage(right) and _exec_sink_reads_program_from_pipe(right)
         if right_is_exec_sink and _is_transparent_suffix_from(i + 1, stage_results, stages):
             continue
 
         # network | exec → block (remote code execution)
-        if _is_network_data_flow_stage(left) and right_is_exec_sink:
+        if network_tainted and right_is_exec_sink:
             return taxonomy.BLOCK, f"remote code execution: {right.tokens[0]} receives network input", "network | exec"
 
         # decode | exec → block (obfuscation)
-        if taxonomy.is_decode_stage(left.tokens) and right_is_exec_sink:
+        if decode_tainted and right_is_exec_sink:
             return taxonomy.BLOCK, f"obfuscated execution: {right.tokens[0]} receives decoded input", "decode | exec"
 
         # any_read | exec → ask
-        if left.action_type == taxonomy.FILESYSTEM_READ and right_is_exec_sink:
+        if read_tainted and right_is_exec_sink:
             return taxonomy.ASK, f"local code execution: {right.tokens[0]} receives file input", "read | exec"
 
     return "", "", ""
@@ -6409,6 +6464,73 @@ def _matches_default_sensitive_path(raw: str) -> bool:
 def _is_exec_sink_stage(sr: StageResult) -> bool:
     """Check if a stage is an exec sink."""
     return bool(sr.tokens) and taxonomy.is_exec_sink(sr.tokens[0])
+
+
+# Inline code that can turn its stdin into code. A literal `-c` program that only
+# parses piped data is data processing, not remote code execution; one that calls
+# an execution primitive on what it read is still a sink for the piped stream.
+_INLINE_CODE_EXEC_PRIMITIVES_RE = re.compile(
+    r"\b(?:exec|eval|compile|__import__|import_module|runpy|subprocess|system|popen|"
+    r"execv[pe]*|execl[pe]*|spawn[lv]?p?e?|pickle|marshal|Function|child_process|vm|"
+    r"source|xargs|sh|bash|zsh|dash|python3?|node|perl|ruby)\b"
+    r"|\$\(|`|/dev/stdin|<&0"
+)
+
+
+def _exec_sink_reads_program_from_pipe(sr: StageResult) -> bool:
+    """True when an exec-sink stage would run its piped input as code.
+
+    The composition rules (`network | exec`, `decode | exec`, `read | exec`)
+    exist for `curl … | bash` and `cat script.py | python3`: the interpreter
+    takes its program from stdin. When the program is a literal argument
+    (`python3 -c 'import json,sys; json.load(sys.stdin)'`), a module
+    (`python3 -m json.tool`) or a script file (`python3 parse.py`), stdin is
+    data; the composition guard then only fires if that literal can execute
+    what it reads. Interpreters without a known flag table stay sinks.
+    """
+    tokens = sr.tokens
+    if not tokens:
+        return False
+    unwrapped = _unwrap_lang_exec_wrapper(tokens)
+    if unwrapped is not None:
+        tokens = unwrapped
+    if not tokens:
+        return True
+    cmd = taxonomy._normalize_command_name(tokens[0])
+    inline = taxonomy._INLINE_FLAGS.get(cmd)
+    if inline is None:
+        return True
+    module_flags = taxonomy._MODULE_FLAGS.get(cmd, set())
+    value_flags = taxonomy._VALUE_FLAGS.get(cmd, set())
+
+    skip_next = False
+    for idx, tok in enumerate(tokens[1:], 1):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "-":
+            return True
+        if tok in value_flags:
+            skip_next = True
+            continue
+        if tok in inline or (cmd == "perl" and re.fullmatch(r"-[A-Za-z0-9]*[eE]", tok)):
+            # perl -ne/-pe/-lane '...' bundle the -e flag; the code is the next token.
+            code = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+            return bool(_INLINE_CODE_EXEC_PRIMITIVES_RE.search(code))
+        if tok in module_flags:
+            # `python3 -m code` / `-m pdb` run stdin as a REPL; only the
+            # modules nah already models as data consumers are exempt.
+            module = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+            return module not in _PYTHON_READ_ONLY_MODULES
+        if tok in ("-s", "-i") and cmd in ("bash", "sh", "dash", "zsh"):
+            # `bash -s` reads commands from stdin (positional args become $1…).
+            return True
+        if tok.startswith("-"):
+            continue
+        # First positional operand: the script file. stdin is data.
+        return "$" in tok or "`" in tok or tok.startswith("/dev/")
+    # No program argument at all: the interpreter reads it from stdin.
+    return True
 
 
 def _aggregate(result: ClassifyResult) -> None:

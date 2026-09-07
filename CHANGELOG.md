@@ -31,6 +31,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Pipe composition no longer blocks a literal program that only consumes
+  piped data.** `curl … | python3 -c 'import json,sys; json.load(sys.stdin)'`
+  was blocked as `[network | exec]` exactly like `curl … | python3`, and
+  `cat x | python3 -m json.tool | sed …` asked as `[read | exec]`. The
+  composition rules now fire only when the sink takes its *program* from the
+  pipe: no program argument, `-`, `bash -s`, an unmodelled `python -m`
+  module, or a literal `-c`/`-e` program that itself calls an execution
+  primitive (`exec`, `eval`, `subprocess`, `$(…)`, …). Data-flow taint now
+  also carries through intermediate filters, so `curl … | jq . | bash` is
+  `[network | exec]` (was a `read | exec` ask).
+
+- **`test -f ~/.netrc` is no longer a sensitive-path block.** `test`/`[`/`[[`
+  built only from stat-style operators (`-e -f -d -s -r …`, `-nt`, `!`, `-a`)
+  never read the file; the sensitive-path policy still applies to any other
+  form and to every real read.
+
 - **`nah run codex` preserves the saved approval reviewer.** The launcher no
   longer forces `approvals_reviewer="user"` or rejects explicit reviewer
   overrides. Codex config/profile defaults can select `"auto_review"`
